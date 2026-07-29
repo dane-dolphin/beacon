@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "beacon-telemetry"
+region = "us-east-1"                 # sits with the existing devicelogs API GW (§12 q2)
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = true
+# AllowedCidr and KeyName have no defaults on purpose — pass at deploy time:
+#   sam deploy --parameter-overrides AllowedCidr=<site-ip>/32 KeyName=<keypair>
+
+[default.validate.parameters]
+lint = true

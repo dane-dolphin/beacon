@@ -1,0 +1,8 @@
+[  501.123456] wlan0: authenticated
+[  502.604062] mali fe400000.bifrost: error detected from slot 0, job status 0x00000058 (DATA_INVALID_FAULT)
+[  502.604097] mali fe400000.bifrost: t6xx: GPU fault 0x58 from job slot 0
+[  510.100000] mali fe400000.bifrost: Unhandled Page fault in AS0 at VA 0x0000000000000000
+[  511.200000] mali fe400000.bifrost: Job Hard-Stopped
+[  512.300000] mali fe400000.bifrost: Reset complete
+[  513.400000] mali fe400000.bifrost: JOB_READ_FAULT at 0x41414141
+[  514.000000] audit: type=1400 audit(1234.567:89): avc: denied

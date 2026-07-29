@@ -1,0 +1,22 @@
+07-27 12:47:32.929  1689  2034 I ReactNativeJS: 'Scheduler:: playNextAd: creative change', { creativeId: 'azdd-PRODUCT-1778274790998',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   contentId: 'PRODUCT-1776822280013',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   campaignId: 'PRODUCT-1776822280013',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   url: 'https://d2wuawlurlul47.cloudfront.net/weather/?version=3',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   mediaPath: 'https://d2wuawlurlul47.cloudfront.net/weather/?version=3',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   durationSecs: 5,
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   mime: 'weblink',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   exchangeType: 'OW_DL',
+07-27 12:47:32.929  1689  2034 I ReactNativeJS:   vc: 183,
+07-27 12:47:32.930  1689  2034 I ReactNativeJS:   dId: 'DD-H33CBP',
+07-27 12:47:32.930  1689  2034 I ReactNativeJS:   installationId: '63718089',
+07-27 12:47:32.930  1689  2034 I ReactNativeJS:   venueCode: 'DD-H33CBP' }
+07-27 12:47:33.101  1689  2034 I ReactNativeJS: PlayerInner:: setNextAd: Setting Active view as WEB_VIEW_2
+07-27 12:47:33.500  1689  1689 I ReactNativeJS: 'StatusHelper:: getHdmiStatus', false
+07-27 12:47:34.001  2533  2533 E ocessService0: failed to create Unix domain socket: Operation not permitted
+07-27 12:47:34.201  2533  2533 E ocessService0: failed to create Unix domain socket: Operation not permitted
+07-27 12:47:34.401  2533  2533 E ocessService0: failed to create Unix domain socket: Operation not permitted
+07-27 12:47:35.000  1200  1250 I ThermalService: CPU temperatures: [76.1]
+07-27 12:47:35.100   980  1020 W PackageWatchdog: Skipping observer registration
+07-27 12:47:36.000  1450  1500 W ActivityManager: Slow operation: 120ms
+07-27 12:47:37.000  1689  2034 I ReactNativeJS: 'AdUtility:: prefetch complete'
+07-27 12:47:38.000   777   777 F DEBUG   : *** *** *** *** *** *** fatal signal

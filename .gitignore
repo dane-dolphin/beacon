@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+var/
+*.egg-info/
+.pytest_cache/
+.aws-sam/
+samconfig.toml.bak

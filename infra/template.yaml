@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Beacon - Dolphin Stick lab telemetry platform (plan.md section 2).
+  One EC2 instance running VictoriaMetrics + Loki + Grafana via docker
+  compose, plus the S3 bucket holding Parquet (forever), Loki chunks (30d)
+  and vmbackup. No Lambda - SAM is used as the CloudFormation deploy tool.
+  EC2 cannot reach the sticks; NUCs on the LAN push to it (section 2.1).
+
+Parameters:
+  AllowedCidr:
+    Type: String
+    Description: >
+      CIDR allowed to reach SSH (22), Grafana (3000), VictoriaMetrics (8428)
+      and Loki (3100). Set to the NUC site's public IP /32. The NUCs PUSH to
+      8428/3100, so this must cover them.
+    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access.
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues: [t4g.medium, t4g.large, m7g.medium, m7g.large]
+    Description: >
+      t4g.medium per section 2.6 (~$25/mo). t4g is burstable - sustained
+      DuckDB work can throttle; m7g.medium is the non-burstable escape.
+  VolumeSizeGiB:
+    Type: Number
+    Default: 100
+    Description: gp3 root volume. Budget in section 2.5 uses 63 of 100 GB. Resizes online.
+  LatestAl2023Arm64Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Resolved automatically; do not override without reason.
+
+Resources:
+
+  TelemetryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub beacon-telemetry-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          # Parquet under metrics/ logs/ events/ and incident bundles are
+          # kept forever (section 2.4). Loki enforces its own 30d retention
+          # via its compactor. Housekeeping only:
+          - Id: abort-incomplete-multipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: expire-old-vmbackups
+            Status: Enabled
+            Prefix: vmbackup/
+            ExpirationInDays: 35
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM Session Manager as a fallback door besides SSH
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: telemetry-bucket-rw
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub ${TelemetryBucket.Arn}/*
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !GetAtt TelemetryBucket.Arn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Beacon telemetry host - SSH/Grafana/VM/Loki from the NUC site only
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,   ToPort: 22,   CidrIp: !Ref AllowedCidr, Description: SSH }
+        - { IpProtocol: tcp, FromPort: 3000, ToPort: 3000, CidrIp: !Ref AllowedCidr, Description: Grafana }
+        - { IpProtocol: tcp, FromPort: 8428, ToPort: 8428, CidrIp: !Ref AllowedCidr, Description: VictoriaMetrics write/query }
+        - { IpProtocol: tcp, FromPort: 3100, ToPort: 3100, CidrIp: !Ref AllowedCidr, Description: Loki push/query }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAl2023Arm64Ami
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3          # 3000 IOPS / 125 MB/s at any size (section 2.5)
+            VolumeSize: !Ref VolumeSizeGiB
+            DeleteOnTermination: false
+      Tags:
+        - { Key: Name, Value: beacon-telemetry }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          # --- docker + compose plugin ---
+          dnf install -y docker
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+          DOCKER_CONFIG=/usr/local/lib/docker
+          mkdir -p $DOCKER_CONFIG/cli-plugins
+          ARCH=aarch64
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$ARCH" \
+            -o $DOCKER_CONFIG/cli-plugins/docker-compose
+          chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+
+          # --- 4 GB swap: DuckDB spills instead of OOMing (section 2.6) ---
+          if ! swapon --show | grep -q swapfile; then
+            fallocate -l 4G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          # --- beacon environment for compose ---
+          cat > /etc/beacon.env <<EOF
+          LOKI_S3_BUCKET=${TelemetryBucket}
+          AWS_REGION=${AWS::Region}
+          EOF
+
+          # --- pull the deploy bundle (compose + configs) from S3 ---
+          # Upload it first with: scripts/push_deploy_bundle.sh <bucket>
+          mkdir -p /opt/beacon
+          if aws s3 cp s3://${TelemetryBucket}/bootstrap/deploy.tar.gz /tmp/deploy.tar.gz; then
+            tar -xzf /tmp/deploy.tar.gz -C /opt/beacon
+            cd /opt/beacon/deploy
+            set -a; . /etc/beacon.env; set +a
+            docker compose up -d
+          else
+            echo "no deploy bundle at s3://${TelemetryBucket}/bootstrap/deploy.tar.gz yet;" \
+                 "upload it and run: cd /opt/beacon/deploy && docker compose up -d"
+          fi
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+
+Outputs:
+  PublicIp:
+    Value: !Ref ElasticIP
+    Description: Stable public IP (NUCs push here; put it in config/beacon.yaml endpoints)
+  GrafanaUrl:
+    Value: !Sub http://${ElasticIP}:3000
+  VictoriaMetricsUrl:
+    Value: !Sub http://${ElasticIP}:8428
+  LokiUrl:
+    Value: !Sub http://${ElasticIP}:3100
+  BucketName:
+    Value: !Ref TelemetryBucket

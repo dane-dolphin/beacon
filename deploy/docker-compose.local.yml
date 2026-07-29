@@ -1,0 +1,6 @@
+# Local-dev override: Loki stores chunks on the filesystem instead of S3.
+services:
+  loki:
+    volumes:
+      - ./loki/loki-local.yaml:/etc/loki/config.yaml:ro
+      - lokidata:/loki

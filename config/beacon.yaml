@@ -1,0 +1,51 @@
+# Beacon collector configuration — one file per NUC.
+# This machine is the dev NUC; production NUCs get their own copy with their
+# own nuc_id and device assignments (explicit ownership, §2.3 of plan.md).
+
+nuc_id: nuc-dev
+
+paths:
+  # SQLite control plane (registry, boot epochs, collector lifecycle)
+  registry_db: ./var/registry.sqlite3
+  # Durable spool: raw stream capture + unshipped batches live here and
+  # survive a collector restart.
+  spool_dir: ./var/spool
+  # Local Parquet output (uploaded to S3 when configured; kept local otherwise)
+  parquet_dir: ./var/parquet
+
+endpoints:
+  victoriametrics: http://localhost:8428
+  loki: http://localhost:3100
+  # s3_bucket: beacon-telemetry-...   # unset = keep Parquet local (pre-deploy)
+  # s3_region: us-east-1
+
+# App under observation
+app_package: com.dolphin_us.dolphinstore
+
+# Explicit device -> NUC ownership. A device listed here is collected by THIS
+# NUC only if nuc matches nuc_id. Cloud alerts on duplicate ingestion later.
+devices:
+  D-005-02408:
+    host: 192.168.0.100      # DHCP moved it from .106 on 2026-07-27
+    port: 5555
+    nuc: nuc-dev
+    modules: [gpu]          # camera/webview/network/screencap default off
+    friendly_name: bench-stick-1
+  4dd8d6299e8c123:
+    host: 192.168.0.105
+    port: 5555
+    nuc: nuc-dev
+    # gpu OFF: this is an rk3588 box, and its /sys/kernel/debug/mali0/gpu_memory
+    # uses a 2-column layout ("mali0  23881" + "kctx-0x…  N") instead of the
+    # Dolphin Stick's "mali0 total used_pages N" + "kctx pid pages" rows, so
+    # rec.sh's parser yields empty totals and cannot attribute pages to a pid.
+    # Logs/thermal/mem/cpu/net all work. Needs a rec.sh parser update (§1.3).
+    modules: []
+    friendly_name: tv-box-rk3588
+
+intervals:
+  # seconds; the 1 Hz tier is produced on-device by rec.sh, not here
+  vsync: 10
+  dumpsys: 45
+  reconnect_backoff_max: 60
+  heartbeat_stall_threshold: 30

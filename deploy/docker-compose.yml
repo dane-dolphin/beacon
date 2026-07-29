@@ -1,0 +1,59 @@
+# Beacon observability stack (§2.4). Identical containers locally and on EC2:
+#   local dev:  docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#   cloud:      docker compose up -d   (Loki chunks in S3; env from /etc/beacon.env)
+# Budget note (§2.6): steady state ~1.1 GB RAM on a 4 GB t4g.medium.
+
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: beacon-vm
+    command:
+      - -retentionPeriod=12          # months — 1 yr full 1 Hz, no downsampled tier (§2.4)
+      - -influxSkipSingleField       # metric name = measurement, not measurement_value
+      - -storageDataPath=/storage
+      - -selfScrapeInterval=10s
+      # collectors push continuously; default 30s hides the freshest points
+      - -search.latencyOffset=5s
+    volumes:
+      - vmdata:/storage
+    ports:
+      - "8428:8428"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: beacon-loki
+    command:
+      - -config.file=/etc/loki/config.yaml
+      - -config.expand-env=true
+    environment:
+      LOKI_S3_BUCKET: ${LOKI_S3_BUCKET:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - ./loki/loki-s3.yaml:/etc/loki/config.yaml:ro
+      - lokidata:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: beacon-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-beacon-dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - victoriametrics
+      - loki
+    restart: unless-stopped
+
+volumes:
+  vmdata:
+  lokidata:
+  grafanadata:
