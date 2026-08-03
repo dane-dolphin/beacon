@@ -31,6 +31,25 @@ devices:
     nuc: nuc-dev
     modules: [gpu]          # camera/webview/network/screencap default off
     friendly_name: bench-stick-1
+  D-005-01860:
+    host: 192.168.0.104      # DHCP lease as of 2026-07-29
+    port: 5555
+    nuc: nuc-dev
+    # Second Dolphin Stick (Droidlogic ohm, Android 11) — same silicon as
+    # D-005-02408: mali0 debugfs uses the "mali0 total used_pages N" +
+    # "kctx pid pages" layout rec.sh expects, and thermal_zone0/1 are
+    # soc_thermal/ddr_thermal, so the gpu module works unmodified.
+    modules: [gpu]
+    friendly_name: bench-stick-2
+  DD-002-0939:
+    host: 192.168.0.107      # DHCP lease as of 2026-07-29
+    port: 5555
+    nuc: nuc-dev
+    # DIFFERENT PLATFORM from the D-005-* sticks: Google "DD-Stick"/ross,
+    # Android 14 (vs Droidlogic ohm / Android 11). Same amlogic SoC family.
+    # modules set from probe results — see TODO "DD-Stick (Android 14) support".
+    modules: [gpu]
+    friendly_name: dd-stick-0939
   4dd8d6299e8c123:
     host: 192.168.0.105
     port: 5555

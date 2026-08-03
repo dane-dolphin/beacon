@@ -15,10 +15,19 @@ log = logging.getLogger(__name__)
 
 
 async def apply_log_remediation(adb: Adb, address: str) -> None:
+    # ORDER MATTERS: `logd --reinit` re-initialises the buffers, so it must run
+    # BEFORE `logcat -G`, never after. On Android 11 (Droidlogic ohm) --reinit
+    # re-reads persist.logd.size and happens to land on 4M, which masked the
+    # bug; on Android 14 (DD-Stick/ross) it resets every buffer to the 256 KiB
+    # default and silently undid the -G immediately preceding it. Measured on
+    # DD-002-0939 2026-07-29: -G then --reinit => 256 KiB; --reinit then -G
+    # => 4 MiB, stable.
     await adb.shell(address, "setprop", "persist.logd.size", "4M")
     await adb.shell(address, "setprop", "persist.logd.filter", '""')
-    await adb.shell(address, "logcat", "-b", "all", "-G", "4M")
     await adb.shell(address, "logd", "--reinit")
+    # -G applies to the running logd immediately; persist.logd.size alone is
+    # only read at logd startup, so a fresh device needs both.
+    await adb.shell(address, "logcat", "-b", "all", "-G", "4M")
 
 
 async def verify_log_remediation(adb: Adb, address: str) -> dict:
