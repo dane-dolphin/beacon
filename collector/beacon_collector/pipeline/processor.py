@@ -40,7 +40,8 @@ class Processor:
         self.registry = registry
         self.loki = LokiShipper(cfg.loki, cfg.spool_dir)
         self.parquet = ParquetShipper(cfg.spool_dir, cfg.parquet_dir,
-                                      cfg.s3_bucket, cfg.s3_region)
+                                      cfg.s3_bucket, cfg.s3_region,
+                                      spool_retention_s=cfg.spool_retention_hours * 3600)
         self._devices: dict[str, _DeviceState] = {}
         # per-device UTC offset (`date +%z`) — logcat prints device-LOCAL time
         self.tz_offsets: dict[str, float] = {}

@@ -220,17 +220,24 @@ Android 11). Same amlogic SoC family. Probe 13/14, now streaming.
 
 ## P1 — do first
 
-- [ ] **Spool pruning.** `parquet_ship.process_closed_hours()` writes the
-      `.jsonl.done` marker but never deletes the `.jsonl`, so every hour is
-      stored twice — raw JSONL plus a ~12× smaller Parquet copy of identical
-      data (`var/spool` 185 MB vs `var/parquet` 15 MB). Costs **~28 MB/h per
-      device** (~20 GB/month/device; ~400 GB/month at the 20-stick target).
-      Fix is one line after a successful convert: delete the `.jsonl`, keep
-      the `.done` marker so nothing is reprocessed. Safe because Parquet is
-      the designed "everything, unfiltered, forever" tier and the spool's job
-      is *unshipped* batches only.
-      **Deliberately deferred** — it is the only code path that deletes data,
-      so land it with someone watching, not unattended.
+- [x] **Spool pruning — LANDED 2026-08-06 (not yet executed).**
+      `process_closed_hours()` wrote the `.jsonl.done` marker but never
+      deleted the `.jsonl`, so every hour was stored twice — raw JSONL plus a
+      ~15× smaller Parquet copy of identical data. It had reached **27 GB of
+      spool against 1.8 GB of Parquet** (~28 MB/h per device).
+      `parquet_ship.prune_converted()` now deletes a JSONL only when its
+      marker is older than `retention.spool_hours` (default **24 h**, set in
+      `config/beacon.yaml`), the Parquet object exists, and its row count
+      matches what the conversion recorded. Anything else keeps the file and
+      logs a WARNING. Markers now carry `{"lines", "rows"}` instead of being
+      empty; pre-existing markers are re-counted through the same
+      `_rows_for()` the converter uses and the result is cached back with the
+      mtime preserved. Runs on the collector's 5-minute cycle, or by hand via
+      `beacon prune [--dry-run] [--min-age-hours N]`.
+      **Still to do: run the real delete.** A `--dry-run` over the 1446-hour
+      backlog was in flight at handoff; the numbers were to be reviewed before
+      deleting anything. The collector process running as of 2026-08-06 is
+      still the pre-change code, so it does not prune until restarted.
 
 - [ ] **Explain the doubled sample rate in 22:04–23:35 on 2026-07-28.**
       That window has ~2× the expected points (1090 vs 544 samples/10 min for

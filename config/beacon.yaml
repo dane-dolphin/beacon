@@ -62,6 +62,15 @@ devices:
     modules: []
     friendly_name: tv-box-rk3588
 
+retention:
+  # Hours to keep a spool JSONL file after it has been converted to Parquet.
+  # Parquet is the "everything, unfiltered, forever" tier and keeps the
+  # verbatim line, so the JSONL is a staging duplicate — this is a grace
+  # period for noticing a bad conversion, not a retention tier. 0 = delete as
+  # soon as the Parquet copy verifies. At ~28 MB/h/device, a day of grace is
+  # roughly 700 MB per device of standing spool.
+  spool_hours: 24
+
 intervals:
   # seconds; the 1 Hz tier is produced on-device by rec.sh, not here
   vsync: 10

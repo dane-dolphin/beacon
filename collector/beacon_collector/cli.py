@@ -30,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("run", help="run the collector for all devices this NUC owns")
 
+    spr = sub.add_parser("prune", help="delete spool JSONL whose Parquet copy verifies (§P1)")
+    spr.add_argument("--dry-run", action="store_true",
+                     help="report what would be deleted, delete nothing")
+    spr.add_argument("--min-age-hours", type=float, default=None,
+                     help="override retention.spool_hours for this run")
+
     args = p.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -43,7 +49,27 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_onboard(cfg, args.serial))
     if args.cmd == "run":
         return asyncio.run(_run(cfg))
+    if args.cmd == "prune":
+        return _prune(cfg, args)
     return 2
+
+
+def _prune(cfg, args) -> int:
+    """One-shot spool prune. The collector does this on its own cycle; this is
+    the supervised door for the first run, where watching it matters."""
+    from .pipeline.parquet_ship import ParquetShipper
+
+    retention = cfg.spool_retention_hours * 3600
+    if args.min_age_hours is not None:
+        retention = args.min_age_hours * 3600
+    shipper = ParquetShipper(cfg.spool_dir, cfg.parquet_dir,
+                             spool_retention_s=retention)
+    n = shipper.prune_converted(dry_run=args.dry_run, retention_s=retention)
+    verb = "would delete" if args.dry_run else "deleted"
+    print(f"{verb} {n['pruned']} hour file(s), {n['bytes'] / 1e9:.2f} GB\n"
+          f"kept {n['kept']} (unverified), {n['young']} within "
+          f"{retention / 3600:.0f}h grace, {n['unconverted']} not yet converted")
+    return 0
 
 
 async def _device(cfg, serial):

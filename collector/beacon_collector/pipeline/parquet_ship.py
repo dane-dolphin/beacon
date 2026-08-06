@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 import pyarrow as pa
@@ -20,7 +21,10 @@ log = logging.getLogger(__name__)
 #
 # Input is the RawSpool's hour-partitioned JSONL: spool/<serial>/<source>/
 # dt=YYYY-MM-DD/hour=HH.jsonl. A closed hour (wall clock has moved past it)
-# is converted once and marked with a .done sidecar.
+# is converted once and marked with a .done sidecar recording what the
+# conversion produced. The JSONL is then a staging duplicate of data that
+# lives here forever, ~15x smaller — prune_converted() deletes it once the
+# Parquet copy verifies and the grace period has passed (§P1).
 
 LOGS_SCHEMA = pa.schema([
     ("ts", pa.timestamp("us", tz="UTC")),          # real INT64 timestamp (§3.6 rule 4)
@@ -50,12 +54,14 @@ def _us(ts: float) -> int:
 class ParquetShipper:
     def __init__(self, spool_dir: str | Path, parquet_dir: str | Path,
                  s3_bucket: str | None = None, s3_region: str = "us-east-1",
-                 scan_interval: float = 300.0):
+                 scan_interval: float = 300.0,
+                 spool_retention_s: float = 86400.0):
         self.spool = Path(spool_dir)
         self.out = Path(parquet_dir)
         self.s3_bucket = s3_bucket
         self.s3_region = s3_region
         self.scan_interval = scan_interval
+        self.spool_retention_s = spool_retention_s
         self._events: list[dict] = []   # buffered event rows, flushed hourly
 
     # ---- events (creative intervals, faults, reboots) -----------------------
@@ -74,11 +80,23 @@ class ParquetShipper:
             try:
                 await asyncio.to_thread(self.process_closed_hours)
                 await asyncio.to_thread(self.flush_events)
+                summary = await asyncio.to_thread(self.prune_converted)
+                if summary["pruned"]:
+                    log.info("spool prune: removed %d converted hour file(s), %.1f MB",
+                             summary["pruned"], summary["bytes"] / 1e6)
             except Exception:
                 log.exception("parquet shipper cycle failed")
             await asyncio.sleep(self.scan_interval)
 
     # ---- logs: spool JSONL hour files -> parquet ----------------------------
+
+    def _key_for(self, jsonl: Path) -> tuple[str, str, str, str, str]:
+        """(parquet key, serial, source, dt, hour) for a spool hour file."""
+        serial, source = jsonl.parts[-4], jsonl.parts[-3]
+        dt = jsonl.parts[-2].split("=", 1)[1]
+        hour = jsonl.stem.split("=", 1)[1]
+        return (f"logs/dt={dt}/hour={hour}/serial={serial}-{source}.parquet",
+                serial, source, dt, hour)
 
     def process_closed_hours(self, now: float | None = None):
         import time as _t
@@ -87,23 +105,39 @@ class ParquetShipper:
             done = jsonl.with_suffix(".jsonl.done")
             if done.exists():
                 continue
-            serial, source = jsonl.parts[-4], jsonl.parts[-3]
-            dt = jsonl.parts[-2].split("=", 1)[1]
-            hour = jsonl.stem.split("=", 1)[1]
+            key, serial, source, dt, hour = self._key_for(jsonl)
             # closed = wall clock is past the end of that hour (UTC)
-            from datetime import datetime, timezone
+            from datetime import datetime
             hour_end = datetime.fromisoformat(f"{dt}T{hour}:00:00+00:00").timestamp() + 3600
             if now < hour_end + 60:
                 continue
-            key = f"logs/dt={dt}/hour={hour}/serial={serial}-{source}.parquet"
-            self._convert_log_hour(jsonl, serial, source, key)
-            done.touch()
+            stats = self._convert_log_hour(jsonl, serial, source, key)
+            # the marker records what this conversion produced, so the pruner can
+            # check the Parquet copy against it before deleting the JSONL
+            done.write_text(json.dumps(stats))
 
-    def _convert_log_hour(self, jsonl: Path, serial: str, source: str, key: str):
+    def _convert_log_hour(self, jsonl: Path, serial: str, source: str, key: str) -> dict:
+        rows, lines = self._rows_for(jsonl, serial, source)
+        stats = {"lines": lines, "rows": len(rows["ts"])}
+        if not rows["ts"]:
+            return stats
+        table = pa.table(
+            {n: pa.array(rows[n], type=LOGS_SCHEMA.field(n).type) for n in LOGS_SCHEMA.names},
+            schema=LOGS_SCHEMA)
+        self._write(table, key)
+        log.info("parquet: %s (%d rows)", key, table.num_rows)
+        return stats
+
+    def _rows_for(self, jsonl: Path, serial: str, source: str) -> tuple[dict, int]:
+        """Build the Parquet columns for one spool hour. Shared by the converter
+        and by the pruner's re-count, so the two can never disagree on what a
+        conversion of this file is supposed to yield."""
         rows = {name: [] for name in LOGS_SCHEMA.names}
         seen: set[tuple] = set()
+        lines = 0
         with open(jsonl, encoding="utf-8") as fh:
             for raw in fh:
+                lines += 1
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
@@ -137,13 +171,90 @@ class ParquetShipper:
                 rows["tag"].append(tag)
                 rows["message"].append(msg)
                 rows["raw"].append(line)
-        if not rows["ts"]:
-            return
-        table = pa.table(
-            {n: pa.array(rows[n], type=LOGS_SCHEMA.field(n).type) for n in LOGS_SCHEMA.names},
-            schema=LOGS_SCHEMA)
-        self._write(table, key)
-        log.info("parquet: %s (%d rows)", key, table.num_rows)
+        return rows, lines
+
+    # ---- spool pruning (§P1) -------------------------------------------------
+
+    def prune_converted(self, now: float | None = None, *, dry_run: bool = False,
+                        retention_s: float | None = None) -> dict:
+        """Delete spool JSONL whose Parquet copy is present and row-count
+        verified, once its conversion is `retention_s` old.
+
+        Lossless by construction: a spooled record is {"ts", "line"} and both
+        survive into Parquet as `ts` and `raw`, in the tier that is retained
+        forever. It is still the only path in this system that deletes data,
+        so the Parquet object must exist AND match the row count the
+        conversion recorded — a missing or short object keeps the JSONL.
+
+        Safe against a running collector: only hours whose marker is older
+        than the grace period are touched, and the collector only ever
+        appends to the current hour.
+
+        `dry_run` deletes nothing, but does still cache a re-derived row count
+        into a legacy marker — that count is deterministic, and caching it is
+        what keeps a dry-run-then-run sequence from parsing the spool twice.
+        """
+        import time as _t
+        now = now if now is not None else _t.time()
+        grace = self.spool_retention_s if retention_s is None else retention_s
+        n = {"pruned": 0, "bytes": 0, "kept": 0, "young": 0, "unconverted": 0}
+
+        for jsonl in sorted(self.spool.glob("*/*/dt=*/hour=*.jsonl")):
+            done = jsonl.with_suffix(".jsonl.done")
+            if not done.exists():
+                n["unconverted"] += 1
+                continue
+            if now - done.stat().st_mtime < grace:
+                n["young"] += 1
+                continue
+
+            key, serial, source, _, _ = self._key_for(jsonl)
+            try:
+                expected = json.loads(done.read_text() or "{}").get("rows")
+            except (json.JSONDecodeError, OSError):
+                expected = None
+            if expected is None:
+                # marker predates the recorded stats (or is unreadable): re-count
+                # from the JSONL itself rather than trusting the marker alone
+                rows, lines = self._rows_for(jsonl, serial, source)
+                expected = len(rows["ts"])
+                # cache it back so a file we end up keeping is not re-parsed on
+                # every cycle; mtime is restored because it dates the conversion
+                mtime = done.stat().st_mtime
+                done.write_text(json.dumps(
+                    {"lines": lines, "rows": expected, "recounted": True}))
+                os.utime(done, (mtime, mtime))
+
+            size = jsonl.stat().st_size
+            if expected == 0:
+                # no rows were ever written, so there is no Parquet to check
+                # against; only an empty file is safe to drop unexamined
+                if size == 0:
+                    n["pruned"] += 1
+                    if not dry_run:
+                        jsonl.unlink()
+                else:
+                    log.warning("prune: %s converted to 0 rows — keeping", jsonl)
+                    n["kept"] += 1
+                continue
+
+            parquet = self.out / key
+            if not parquet.exists():
+                log.warning("prune: %s missing — keeping %s", key, jsonl)
+                n["kept"] += 1
+                continue
+            actual = pq.read_metadata(parquet).num_rows
+            if actual != expected:
+                log.warning("prune: %s has %d rows, conversion wrote %d — keeping %s",
+                            key, actual, expected, jsonl)
+                n["kept"] += 1
+                continue
+
+            n["pruned"] += 1
+            n["bytes"] += size
+            if not dry_run:
+                jsonl.unlink()      # the .done marker stays: never reprocessed
+        return n
 
     # ---- events -------------------------------------------------------------
 

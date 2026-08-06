@@ -37,6 +37,7 @@ class Config:
     dumpsys_interval: int = 45
     reconnect_backoff_max: int = 60
     heartbeat_stall_threshold: int = 30
+    spool_retention_hours: int = 24
 
     def my_devices(self) -> list[DeviceConfig]:
         """Devices this NUC owns — explicit assignment only (§2.3)."""
@@ -82,4 +83,5 @@ def load_config(path: str | os.PathLike) -> Config:
         dumpsys_interval=int(intervals.get("dumpsys", 45)),
         reconnect_backoff_max=int(intervals.get("reconnect_backoff_max", 60)),
         heartbeat_stall_threshold=int(intervals.get("heartbeat_stall_threshold", 30)),
+        spool_retention_hours=int(raw.get("retention", {}).get("spool_hours", 24)),
     )
