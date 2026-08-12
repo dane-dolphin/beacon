@@ -5,7 +5,8 @@ from pathlib import Path
 from beacon_collector.parsers import dmesg
 from beacon_collector.parsers.logcat import attach_year, parse_logcat_line
 from beacon_collector.parsers.reassemble import Reassembler
-from beacon_collector.parsers.recorder_line import (normalize_proc,
+from beacon_collector.parsers.recorder_line import (MAX_PROC_NAME,
+                                                    normalize_proc,
                                                     parse_recorder_line,
                                                     parse_top_line)
 from beacon_collector.parsers import rn_fields
@@ -67,14 +68,30 @@ def test_top_line_renderer_digits_collapse_for_cardinality():
 
     assert normalize_proc("com.foo:sandboxed_process12") == "com.foo:sandboxed_processN"
     assert normalize_proc("com.foo:webview") == "com.foo:webview"
-    # digits that are NOT a renderer counter carry meaning and stay
-    assert normalize_proc("webview_zygote32") == "webview_zygote32"
     assert normalize_proc("/system/bin/surfaceflinger") == "surfaceflinger"
-    # only an ABSOLUTE path is stripped: kernel threads are named kworker/0:1,
-    # and a blind split on "/" would label them "0:N" — the identity is lost.
-    # The remaining slash is rewritten by the charset rule, which is fine.
-    assert normalize_proc("kworker/0:1") == "kworker_0:N"
+    # only an ABSOLUTE path is stripped: a blind split on "/" would turn a
+    # kernel thread into "0:N" and lose the identity entirely
+    assert normalize_proc("kworker/0:1") == "kworker_N:N"
     assert len(normalize_proc("x" * 200)) == 64
+
+
+def test_real_webview_renderers_collapse_to_one_series():
+    """Measured on hyperion 2026-08-11. Collapsing digits only in the LAST
+    colon segment left process0/process1/... distinct, and the 64-char cap then
+    truncated mid-token so they stayed distinct — one permanent series per
+    renderer. Digits collapse in EVERY segment now, and segments past the
+    second are Chromium class names carrying no identity."""
+    a = normalize_proc("com.google.android.webview:sandboxed_process0:"
+                       "org.chromium.content.app.SandboxedProcessService0:0")
+    b = normalize_proc("com.google.android.webview:sandboxed_process1:"
+                       "org.chromium.content.app.SandboxedProcessService1:0")
+    assert a == b == "com.google.android.webview:sandboxed_processN"
+    assert len(a) < MAX_PROC_NAME       # not truncated, so still readable
+
+    # The cost, accepted: trailing digits anywhere lose their meaning. A
+    # bounded label set is worth more than knowing the zygote's bitness.
+    assert normalize_proc("webview_zygote32") == "webview_zygoteN"
+    assert normalize_proc("webview_zygote") == "webview_zygote"   # still distinct
 
 
 def test_v1_parser_untouched_by_v2_lines():

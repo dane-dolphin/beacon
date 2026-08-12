@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .adb import Adb
@@ -156,18 +157,26 @@ async def _device(cfg, serial):
     never named in the YAML — and probe/onboard are exactly what you reach for
     on a freshly adopted device whose platform is unknown.
     """
+    from .config import DeviceConfig
     dev = cfg.devices.get(serial)
-    if not dev:
-        from .config import DeviceConfig
-        row = next((d for d in Registry(cfg.registry_db).list_devices()
-                    if d["serial"] == serial), None)
-        if row and row.get("address"):
-            host, _, port = row["address"].rpartition(":")
-            dev = DeviceConfig(serial=serial, host=host, port=int(port or 5555),
-                               nuc=cfg.nuc_id, friendly_name=row["friendly_name"],
-                               discovered=True)
-            print(f"{serial}: not in config; using discovered address "
-                  f"{dev.address}", file=sys.stderr)
+    row = next((d for d in Registry(cfg.registry_db).list_devices()
+                if d["serial"] == serial), None)
+    if dev is not None and row and row.get("address") and row["address"] != dev.address:
+        # A configured host: is a DHCP lease and goes stale — probing
+        # D-005-02408 at the config's .100 fails while it is happily streaming
+        # at .57. Prefer the address it last actually answered on, same rule
+        # the collector uses at startup.
+        print(f"{serial}: config says {dev.address}, using last known "
+              f"{row['address']}", file=sys.stderr)
+        host, _, port = row["address"].rpartition(":")
+        dev = replace(dev, host=host, port=int(port) if port.isdigit() else dev.port)
+    elif dev is None and row and row.get("address"):
+        host, _, port = row["address"].rpartition(":")
+        dev = DeviceConfig(serial=serial, host=host, port=int(port or 5555),
+                           nuc=cfg.nuc_id, friendly_name=row["friendly_name"],
+                           discovered=True)
+        print(f"{serial}: not in config; using discovered address "
+              f"{dev.address}", file=sys.stderr)
     if not dev:
         known = sorted(set(cfg.devices) | {d["serial"] for d in
                                            Registry(cfg.registry_db).list_devices()})

@@ -79,10 +79,20 @@ def normalize_proc(name: str) -> str:
         name = name.rsplit("/", 1)[-1]        # /system/bin/foo -> foo
     # NOT an unconditional split on "/": kernel threads are named kworker/0:1,
     # and stripping to the last segment would turn that into "0:1".
-    if ":" in name:
-        head, _, tail = name.rpartition(":")
-        name = f"{head}:{_TRAILING_DIGITS.sub('N', tail)}"
-    name = _UNSAFE.sub("_", name)
+    parts = name.split(":")
+    # Collapse trailing digits in EVERY segment, not just the last. Real
+    # WebView renderers are named
+    #   com.google.android.webview:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0
+    # so digit-collapsing only the final ":0" leaves process0/process1/... as
+    # distinct series — one per renderer, forever.
+    parts = [_TRAILING_DIGITS.sub("N", p) for p in parts]
+    # Keep package plus one suffix. Segments beyond that are Chromium class
+    # names carrying no identity, and they push the distinguishing part past
+    # the length cap, where truncation would split process0 from process1
+    # again.
+    if len(parts) > 2:
+        parts = parts[:2]
+    name = _UNSAFE.sub("_", ":".join(parts))
     return name[:MAX_PROC_NAME]
 
 

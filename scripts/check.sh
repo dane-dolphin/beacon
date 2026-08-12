@@ -111,7 +111,12 @@ for x in d["devices"]:
   [ -z "$serials" ] && note "no recently-live devices to probe"
   for s in $serials; do
     printf '  --- %s\n' "$s"
-    "$BEACON" probe "$s" 2>&1 | grep -E "checks passed|\"ok\": false" -A1 | sed 's/^/      /'
+    "$BEACON" probe "$s" 2>/dev/null | python3 -c '
+import json, sys
+try: r = json.load(sys.stdin)
+except Exception: print("      probe produced no JSON (device unreachable?)"); raise SystemExit
+bad = [k for k, v in r.items() if not v["ok"]]
+print(f"      {len(r)-len(bad)}/{len(r)} passed" + (f"  FAILED: {\", \".join(bad)}" if bad else ""))'
   done
 fi
 
