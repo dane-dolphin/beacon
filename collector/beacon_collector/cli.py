@@ -202,6 +202,39 @@ async def _onboard(cfg, serial) -> int:
     return 0 if report["all_buffers_4mib"] else 1
 
 
+def _seed_addresses(devices, registry):
+    """Start each device at the last address it actually answered on.
+
+    `host:` in the YAML is a DHCP lease, not an identity, and it goes stale the
+    first time a device renews. Discovery fixes that within one sweep — but
+    only after the supervisor has spent up to `interval` seconds retrying a
+    dead address, on every restart, forever. The registry already holds the
+    address that last worked (written by upsert_device on each successful
+    connect), so prefer it and make restarts instant.
+
+    The YAML value stays useful as the seed for a device the registry has
+    never seen. Caller only invokes this when discovery is enabled, so an
+    operator editing `host:` by hand on a discovery-off NUC is never overridden.
+    """
+    try:
+        known = {d["serial"]: d for d in registry.list_devices()}
+    except Exception:
+        log.exception("could not read last known addresses; using config as-is")
+        return
+    for dev in devices:
+        row = known.get(dev.serial)
+        if not row or not row.get("address"):
+            continue
+        host, _, port = row["address"].rpartition(":")
+        if not host or host == dev.host:
+            continue
+        log.info("%s: starting at last known address %s (config says %s)",
+                 dev.serial, row["address"], dev.address)
+        dev.host = host
+        if port.isdigit():
+            dev.port = int(port)
+
+
 def _log_task_death(task: asyncio.Task):
     """Supervisors spawned after startup are not in the original gather(), so
     an exception in one would otherwise be swallowed until interpreter exit."""
@@ -309,6 +342,12 @@ async def _run(cfg) -> int:
     log.info("collector %s starting: %d device(s): %s",
              cfg.nuc_id, len(devices), [d.serial for d in devices])
 
+    # Only when discovery is on. With discovery OFF the YAML is the sole
+    # source of truth and a deliberate `host:` edit must win; with it ON the
+    # address is discovered anyway, so starting from the last one that worked
+    # only saves a sweep of dead retries.
+    if cfg.discovery.enabled:
+        _seed_addresses(devices, registry)
     owned: dict[str, DeviceConfig] = {d.serial: d for d in devices}
     sups = [DeviceSupervisor(adb, d, cfg, registry, spool, vm, counters, processor)
             for d in devices]

@@ -4,6 +4,45 @@ Runbook for getting beacon off the dev laptop and onto real hardware.
 `plan.md` is the design authority; this file is the sequence of commands and
 the traps between them.
 
+## Day to day
+
+**Health check — run this after any deploy, or any time something looks off:**
+
+```bash
+cd /opt/beacon && ./scripts/check.sh
+```
+
+Read-only, ~2 seconds: units, containers, the three HTTP endpoints, the device
+table, recent discovery/connect activity, push failures since the last start,
+and whether `rec.sh`'s per-process tier is producing anything. Exits non-zero if
+something is wrong, so it works from cron too. Add `--probe` to also probe every
+device seen in the last 15 minutes (slower, needs adb).
+
+**Shipping a change — dev machine first, then hyperion:**
+
+```bash
+# on the dev machine
+.venv/bin/pytest -q                                   # do not ship red
+git add -A && git commit -m "..." && git push
+
+# on hyperion
+cd /opt/beacon && git pull
+./scripts/check.sh
+```
+
+`git pull` alone is usually enough — dashboards reload on a 30 s poll, `rec.sh`
+is pushed to devices on the next connect, and device overrides apply within
+60 s. **Restart the collector only when `config/beacon.yaml` changed, or when
+collector Python changed and you want it live now.** Nothing needs a periodic
+restart; see [the full table](#shipping-a-change-to-hyperion) for what re-runs
+when.
+
+The two machines may authenticate to GitHub differently — hyperion's remote is
+HTTPS, the dev laptop's is SSH. If `git fetch` fails on one, check `git remote
+-v` before assuming the repo is broken.
+
+---
+
 Two phases, in order. **Phase 1 is the current plan** — everything local on
 hyperion, no AWS. It stands alone and can run indefinitely. Phase 2 is a later
 endpoint change, not a rebuild.

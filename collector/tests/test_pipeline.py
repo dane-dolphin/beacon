@@ -382,3 +382,60 @@ def test_last_seen_is_refreshed_while_streaming(tmp_path):
     _t.sleep(0.01)
     r.touch_device("S1")
     assert r.list_devices()[0]["last_seen"] > before
+
+
+def test_startup_prefers_the_last_address_that_actually_worked(tmp_path):
+    """A stale YAML host: costs up to one discovery interval of dead retries on
+    every restart. D-005-02408's lease moved .100 -> .57 while the config still
+    said .100."""
+    from beacon_collector.cli import _seed_addresses
+    from beacon_collector.config import DeviceConfig
+
+    r = _reg(tmp_path)
+    r.upsert_device("D-005-02408", "192.168.0.57:5555", "nuc-a", "")
+    dev = DeviceConfig(serial="D-005-02408", host="192.168.0.100", nuc="nuc-a")
+    never = DeviceConfig(serial="NEVER-SEEN", host="192.168.0.9", nuc="nuc-a")
+
+    _seed_addresses([dev, never], r)
+    assert dev.address == "192.168.0.57:5555"      # registry wins
+    assert never.address == "192.168.0.9:5555"     # config seeds the unseen
+
+
+def test_seeding_survives_a_broken_registry(tmp_path):
+    """Never let a control-plane read failure stop the collector starting."""
+    from beacon_collector.cli import _seed_addresses
+    from beacon_collector.config import DeviceConfig
+
+    class Broken:
+        def list_devices(self): raise RuntimeError("locked")
+
+    dev = DeviceConfig(serial="S1", host="10.0.0.1", nuc="n")
+    _seed_addresses([dev], Broken())
+    assert dev.address == "10.0.0.1:5555"
+
+
+def test_a_hand_edited_host_wins_when_discovery_is_off(tmp_path, monkeypatch):
+    """With discovery off the YAML is the only source of truth, so seeding must
+    not quietly override a deliberate `host:` edit."""
+    import asyncio, sys
+    from beacon_collector import cli
+    from beacon_collector.config import DeviceConfig
+
+    seeded = []
+    monkeypatch.setattr(cli, "_seed_addresses",
+                        lambda devs, reg: seeded.append(devs))
+    cfg = _cfg(tmp_path, devices={"S1": DeviceConfig(serial="S1", host="10.0.0.1",
+                                                     nuc="nuc-a")})
+    cfg.registry_db = tmp_path / "r.db"
+    cfg.spool_dir = tmp_path / "spool"
+    cfg.parquet_dir = tmp_path / "pq"
+    assert cfg.discovery.enabled is False
+
+    async def stop_immediately(*a, **k):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(asyncio, "gather", stop_immediately)
+    try:
+        asyncio.run(cli._run(cfg))
+    except Exception:
+        pass
+    assert seeded == [], "seeding must not run with discovery disabled"

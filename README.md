@@ -27,7 +27,7 @@ sticks (adb TCP :5555) ──> NUC collector (this repo, Python)
 | `deploy/systemd/` | collector + console units — copy, do not retype |
 | `infra/` | AWS SAM template (EC2 + S3 + IAM), `sam validate --lint` clean |
 | `config/beacon.yaml` | per-NUC config: endpoints, device→NUC ownership |
-| `scripts/` | fixture capture, e2e check, parquet compaction, deploy bundle |
+| `scripts/` | `check.sh` health check, fixture capture, e2e, compaction, deploy bundle |
 
 ## Quick start (local dev — this machine is the NUC)
 
