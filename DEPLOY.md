@@ -91,9 +91,51 @@ $(. /etc/os-release && echo "$UBUNTU_CODENAME") stable" \
 sudo apt update
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"       # log out and back in for this to take
-docker compose version                # must succeed before continuing
+sudo usermod -aG docker "$USER"
 ```
+
+Group membership only applies to a **new login session** — log out and back in,
+or `newgrp docker` in the current shell, or every command below fails with
+permission denied on the socket.
+
+Now verify, and note *what* each check proves:
+
+```bash
+docker compose version    # only the CLI plugin — passes even if the daemon is dead
+docker info               # actually talks to the daemon
+docker run --rm hello-world
+```
+
+**If `docker.service` failed to start**, and especially if the install output
+said `Stopping 'docker.service', but its triggering units are still active:
+docker.socket` or `Could not execute systemctl`, you upgraded over the distro
+packages — apt will have removed `docker.io`, `containerd` and `runc`. That
+transition leaves stale units and sometimes a config the new daemon rejects.
+Diagnose containerd first; if it is down, Docker cannot start regardless and
+its own journal will be misleading:
+
+```bash
+systemctl status containerd --no-pager -l
+systemctl status docker.service --no-pager -l
+journalctl -xeu docker.service --no-pager | tail -40
+```
+
+```bash
+# 1. stale units left by the package swap
+sudo systemctl daemon-reload && sudo systemctl reset-failed
+sudo systemctl enable --now containerd
+sudo systemctl enable --now docker.socket
+sudo systemctl enable --now docker
+
+# 2. containerd config written for the old version — 2.x refuses to parse it
+sudo mv /etc/containerd/config.toml /etc/containerd/config.toml.bak
+sudo systemctl restart containerd && sudo systemctl restart docker
+
+# 3. leftover /etc/docker/daemon.json from docker.io — an unknown key makes the
+#    daemon exit immediately; move it aside and restart
+```
+
+Installing Docker CE on a box that never had `docker.io` avoids all of this.
 
 **Android platform-tools** — `adb` is not expected on PATH; the systemd unit
 points `BEACON_ADB` at it.
@@ -107,8 +149,36 @@ sudo unzip -q platform-tools-latest-linux.zip && sudo rm platform-tools-latest-l
 
 ### 2. Repo and Python environment
 
+Get the repo to `/opt/beacon` by whichever route works. **Verify the remote
+actually has your commits first** — `ssh -T git@github.com` and `git fetch
+origin` both have to succeed on the dev machine, or a clone gives you a stale
+tree or nothing at all:
+
 ```bash
 sudo git clone <repo-url> /opt/beacon
+```
+
+If the remote is not set up, copy from the dev machine instead. The repo minus
+build artifacts is ~2 MB and `.git` comes along, so history stays intact and
+you can push from either box later:
+
+```bash
+# run on the dev machine. Use hyperion's IP, NOT its hostname: both boxes are
+# Pop!_OS and default to the hostname "pop-os", so a name-based target
+# resolves to the sending machine and silently does nothing useful.
+rsync -av --exclude '.venv' --exclude 'var' \
+  ~/Work/beacon/ hyperion@<hyperion-ip>:/tmp/beacon-src/
+
+# then on hyperion
+sudo mv /tmp/beacon-src /opt/beacon
+```
+
+Never copy `.venv/` (~250 MB, built against the other machine's Python) or
+`var/` (~4 GB). hyperion must start with an empty `var/`: a borrowed
+`registry.sqlite3` carries another machine's boot epochs, and `boot_epoch` is
+what converts every device-monotonic timestamp to wall clock (§1.11).
+
+```bash
 sudo chown -R "$USER" /opt/beacon
 cd /opt/beacon
 python3 -m venv .venv
