@@ -154,13 +154,22 @@ actually has your commits first** — `ssh -T git@github.com` and `git fetch
 origin` both have to succeed on the dev machine, or a clone gives you a stale
 tree or nothing at all:
 
+**Why `/opt/beacon`.** `/opt` is the FHS location for add-on software and is
+the conventional home for something that runs as a system service. `$HOME`
+works too and needs no `sudo`/`chown`, but `/opt` keeps the checkout
+independent of any one user account — worth it if the collector ever moves to a
+dedicated service user. One caveat if you *do* put it under `/home` on some
+other machine: a `/home` on a separately-mounted or per-user-encrypted
+filesystem is not available when a system service starts at boot.
+
 ```bash
 sudo git clone <repo-url> /opt/beacon
 ```
 
 If the remote is not set up, copy from the dev machine instead. The repo minus
 build artifacts is ~2 MB and `.git` comes along, so history stays intact and
-you can push from either box later:
+you can push from either box later. rsync copies the **working tree**, so
+uncommitted changes come too and nothing needs pushing first:
 
 ```bash
 # run on the dev machine. Use hyperion's IP, NOT its hostname: both boxes are
@@ -179,22 +188,40 @@ Never copy `.venv/` (~250 MB, built against the other machine's Python) or
 what converts every device-monotonic timestamp to wall clock (§1.11).
 
 ```bash
-sudo chown -R "$USER" /opt/beacon
+sudo chown -R "$USER" /opt/beacon    # so the venv and var/ are yours to write
 cd /opt/beacon
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'     # add '[s3]' only in Phase 2
+.venv/bin/pytest -q                   # expect 41 passed
 ```
-
-`var/` is gitignored, so nothing carries over from the laptop. That is
-intended — see *What does not migrate* below.
 
 ### 3. Observability stack
 
+Put the secrets in `deploy/.env` rather than exporting them. Compose reads that
+file regardless of who invokes it, which matters because **`sudo` strips your
+environment** (`env_reset` is the sudoers default): `export
+GRAFANA_ADMIN_PASSWORD=… ; sudo docker compose up -d` silently yields a Grafana
+on the default `beacon-dev`, with no error. In Phase 2 the same thing empties
+`LOKI_S3_BUCKET`. `.env` sidesteps it, and mirrors how EC2 already works via
+`/etc/beacon.env`.
+
 ```bash
 cd /opt/beacon/deploy
-export GRAFANA_ADMIN_PASSWORD='<something-not-beacon-dev>'
+cat > .env <<'EOF'
+GRAFANA_ADMIN_PASSWORD=<something-not-beacon-dev>
+EOF
+chmod 600 .env
+
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 ```
+
+Running compose under `sudo` is fine — the daemon is root either way, and
+membership in the `docker` group is effectively root-equivalent, so this is a
+convenience choice, not a security one. If you do use `sudo`, use it for
+*every* compose call: `sudo docker compose up -d` followed by an unprivileged
+`docker compose ps` reports permission denied and looks like nothing is
+running. The collector is unaffected either way — it never talks to Docker;
+`After=docker.service` in its unit is ordering only.
 
 The `.local` override is what puts Loki chunks on the filesystem instead of
 S3. Without it Loki will try to reach a bucket that does not exist yet.
@@ -216,19 +243,13 @@ devices:
 and not the other and the collector starts cleanly, logs nothing unusual, and
 collects zero devices.
 
-Also make `paths:` absolute — they are relative to the repo root today, which
-breaks under a systemd unit whose WorkingDirectory you may change:
-
-```yaml
-paths:
-  registry_db: /var/lib/beacon/registry.sqlite3
-  spool_dir: /var/lib/beacon/spool
-  parquet_dir: /var/lib/beacon/parquet
-```
+**Leave `paths:` alone.** They are relative to the repo root, and the unit
+below sets `WorkingDirectory` to exactly that, so `./var/...` resolves
+correctly — the same arrangement the dev laptop has been running on. Only make
+them absolute if you move the data off the repo directory.
 
 ```bash
-sudo mkdir -p /var/lib/beacon /var/log/beacon
-sudo chown -R "$USER" /var/lib/beacon /var/log/beacon
+mkdir -p /opt/beacon/var        # systemd creates the log FILE, not its directory
 ```
 
 `endpoints:` stay on `localhost` in Phase 1.
@@ -236,7 +257,7 @@ sudo chown -R "$USER" /var/lib/beacon /var/log/beacon
 ### 5. systemd unit
 
 **The unit is not in the repo.** It exists only as a *user* unit on the dev
-laptop. On a real box use a system unit — write
+laptop and has to be written for any new box. Write
 `/etc/systemd/system/beacon-collector.service`:
 
 ```ini
@@ -247,18 +268,27 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=beacon
+User=hyperion
 WorkingDirectory=/opt/beacon
 Environment=BEACON_ADB=/opt/android/platform-tools/adb
 ExecStart=/opt/beacon/.venv/bin/beacon run
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/beacon/beacon.log
-StandardError=append:/var/log/beacon/beacon.log
+StandardOutput=append:/opt/beacon/var/beacon.log
+StandardError=append:/opt/beacon/var/beacon.log
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+**Paths here must be literal.** systemd does not expand `$HOME` or `~` in
+`WorkingDirectory`, `ExecStart` or `StandardOutput` — a unit written with
+`$HOME` fails to start with a confusing "not an absolute path" error. Adjust
+`User=` and the three paths if your username is not `hyperion`.
+
+The collector never talks to Docker, so it needs no group membership and no
+socket access; `After=docker.service` is ordering only, so the stack is up
+before the collector starts pushing to it.
 
 ### 6. Cutover
 
@@ -286,7 +316,7 @@ sudo systemctl status beacon-collector
 ```bash
 .venv/bin/pytest -q                     # 41 tests
 .venv/bin/python scripts/e2e_local.py   # replays fixtures through VM + Loki
-tail -f /var/log/beacon/beacon.log
+tail -f /opt/beacon/var/beacon.log
 ```
 
 Then Grafana at `http://<hyperion>:3000` → Beacon → **Device Detail**. Data
@@ -306,7 +336,9 @@ Two things to check that are easy to miss:
 
 ```cron
 # nightly Parquet compaction (§3.6) — merges hour objects into day files
-15 3 * * *  /opt/beacon/.venv/bin/python /opt/beacon/scripts/compact_parquet.py /var/lib/beacon/parquet
+15 3 * * *  /opt/beacon/.venv/bin/python \
+            /opt/beacon/scripts/compact_parquet.py \
+            /opt/beacon/var/parquet
 ```
 
 **Spool pruning is deliberately not on a cron yet.** The collector prunes on
@@ -436,7 +468,9 @@ template handles this by printing the manual command instead of failing. So:
 
 ```bash
 scripts/push_deploy_bundle.sh <BucketName-from-output>
-# then, on the instance (SSH or SSM Session Manager):
+# then, on the INSTANCE (SSH or SSM Session Manager) — note /opt/beacon:
+# that is where the template's user-data untars the bundle, unrelated to
+# where the repo lives on hyperion.
 cd /opt/beacon/deploy && docker compose up -d
 ```
 

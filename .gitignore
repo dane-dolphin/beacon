@@ -6,3 +6,4 @@ var/
 .pytest_cache/
 .aws-sam/
 samconfig.toml.bak
+deploy/.env
