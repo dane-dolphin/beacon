@@ -211,6 +211,18 @@ class DeviceSupervisor:
         is_new = self.registry.record_boot(d.serial, boot_epoch, reason, clock_offset)
         self.boot_epoch = self.registry.current_boot_epoch(d.serial) or boot_epoch
 
+        # Self-heal. The cursors below are per-boot, so a cursor ahead of the
+        # device's own uptime is stale by construction: it survived a boot that
+        # the branch below did not fire on. Left alone it is permanent — every
+        # real line fails `up > seen` forever and the recorder tier stays dark
+        # until someone restarts the collector, which is exactly how four
+        # sticks lost ~15 h of metrics on 2026-08-12. Cheap, and it recovers a
+        # collector that is already poisoned without needing a restart.
+        if self.last_uptime > uptime:
+            log.warning("%s: recorder cursor %.0fs is ahead of uptime %.0fs — "
+                        "stale boot cursor, resetting", d.serial, self.last_uptime, uptime)
+            self.last_uptime = 0.0
+
         if is_new and self._had_boot:
             # reboot: reset all per-boot cursors, count it, re-verify logd persistence
             log.info("%s: REBOOT detected (reason=%s)", d.serial, reason)
@@ -227,7 +239,8 @@ class DeviceSupervisor:
 
     async def _pump_recorder(self):
         d = self.dev
-        async for raw in recorder.backfill_and_follow(self.adb, d.address, self.last_uptime):
+        async for raw in recorder.backfill_and_follow(self.adb, d.address, self.last_uptime,
+                                                      self.boot_epoch):
             if raw.startswith(TOP_PREFIX):
                 t = parse_top_line(raw)
                 if t is None:

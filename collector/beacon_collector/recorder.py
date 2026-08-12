@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from pathlib import Path
 
 from .adb import Adb
@@ -52,13 +53,18 @@ async def ensure_running(adb: Adb, address: str, app_package: str) -> bool:
     return alive
 
 
-async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
+async def backfill_and_follow(adb: Adb, address: str, last_uptime: float,
+                              boot_epoch: float | None = None):
     """Yield raw recorder lines: first everything newer than last_uptime from
     the rotated + current files (the disconnect gap), then follow live.
 
     Dedup is by device uptime, which is strictly increasing within a boot;
     after a reboot uptime resets below last_uptime, so pass last_uptime=0.
     The overlap between the cat and the tail is removed by the same rule.
+
+    boot_epoch is what makes the follow safe across a reboot — see
+    _is_stale_boot. Pass it whenever it is known; without it the follow keeps
+    the old, unguarded behaviour.
 
     The device's toybox tail has no -F: after rec.sh rotates (mv + fresh
     append, §7) a plain -f goes silent on the old fd. The idle timeout
@@ -93,6 +99,8 @@ async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
             async for line in s.lines(idle_timeout=90.0):
                 top_up = _top_uptime_of(line)
                 if top_up is not None:
+                    if _is_stale_boot(top_up, boot_epoch):
+                        continue
                     if top_up > seen_top:
                         seen_top = top_up
                         got_any = True
@@ -100,6 +108,10 @@ async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
                     continue
                 up = _uptime_of(line)
                 if up is None:
+                    continue
+                # Drop the previous boot's replay BEFORE it can touch prev_up,
+                # the cursor, or the ingest path.
+                if _is_stale_boot(up, boot_epoch):
                     continue
                 if prev_up is not None and up < prev_up:
                     # reboot while following: boot_epoch is now stale, so every
@@ -117,6 +129,41 @@ async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
             # than a rotation — bail out and let the supervisor reconnect
             return
         log.info("%s: recorder tail went idle (rotation?) — reopening", address)
+
+
+# Slack on the uptime ceiling below. It absorbs host/device clock drift and
+# the lag between reading /proc/uptime and reading a line; it only has to stay
+# small next to the distance between boots, which is hours.
+_STALE_SLACK = 300.0
+
+
+def _is_stale_boot(uptime: float, boot_epoch: float | None) -> bool:
+    """True if this line belongs to a boot older than the current one.
+
+    `tail -f -n 50` replays the last 50 lines before it starts following, and
+    rec.log is append-only across reboots (§7), so on the first follow after a
+    reboot that replay straddles the boot boundary. The backfill above is
+    filtered by _current_boot_lines(); the replay never was, which is the whole
+    bug it was written to prevent, leaking in through the other door:
+
+      - the old boot's uptimes are huge, so they clear `up > seen`, get yielded,
+        and are stamped with the NEW boot_epoch — points land hours in the
+        future (the second failure mode in _current_boot_lines' docstring);
+      - `seen` and the supervisor's last_uptime cursor jump to the old boot's
+        maximum;
+      - the first genuine line of this boot is then a decrease, so the
+        reboot-mid-follow guard fires and ends the session. On reconnect the
+        boot is no longer new, so the supervisor's reset does not run, the
+        poisoned cursor survives, and the recorder tier stays dark for good.
+
+    Observed 2026-08-12: four sticks that rebooted went silent for ~15 h and
+    wrote 4,343 future-stamped points between them.
+
+    The discriminator is that uptime cannot exceed the age of the current boot.
+    """
+    if not boot_epoch:
+        return False
+    return uptime > (time.time() - boot_epoch) + _STALE_SLACK
 
 
 def _current_boot_lines(lines: list[str]) -> list[str]:

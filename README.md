@@ -21,6 +21,7 @@ sticks (adb TCP :5555) ──> NUC collector (this repo, Python)
 |---|---|
 | `plan.md` | the build brief — ground truth |
 | `DEPLOY.md` | deployment runbook: NUC all-in-one, then EC2 split |
+| `NOTES-2026-08-11.md` | handoff: hyperion deployment + live GPU-freeze A/B |
 | `collector/` | Python package `beacon_collector` (NUC side) |
 | `device/rec.sh` | on-device 1 Hz recorder, survives adb disconnects (§1.12) |
 | `deploy/` | docker compose: VictoriaMetrics + Loki + Grafana + provisioning |
