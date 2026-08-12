@@ -1,8 +1,11 @@
-# Beacon collector configuration — one file per NUC.
-# This machine is the dev NUC; production NUCs get their own copy with their
-# own nuc_id and device assignments (explicit ownership, §2.3 of plan.md).
+# Beacon collector configuration — one file per NUC (§2.3 of plan.md).
+#
+# This tracked copy is HYPERION's: the box on 192.168.0.3 that shares a LAN
+# with the sticks. Another NUC needs its own nuc_id, its own device
+# assignments, and its own discovery.subnet — run it with
+# `beacon -c config/beacon.<nuc>.yaml run` rather than editing this one.
 
-nuc_id: nuc-dev
+nuc_id: nuc-hyperion
 
 paths:
   # SQLite control plane (registry, boot epochs, collector lifecycle)
@@ -38,7 +41,7 @@ app_package: com.dolphin_us.dolphinstore
 # It also relocates a known serial that changed DHCP lease, which a static
 # host: cannot: a lease is not an identity.
 discovery:
-  enabled: false
+  enabled: true
   subnet: 192.168.0.0/24
   port: 5555
   interval: 300           # seconds between sweeps
@@ -50,13 +53,13 @@ devices:
   D-005-02408:
     host: 192.168.0.100      # DHCP moved it from .106 on 2026-07-27
     port: 5555
-    nuc: nuc-dev
+    nuc: nuc-hyperion
     modules: [gpu]          # camera/webview/network/screencap default off
     friendly_name: bench-stick-1
   D-005-01860:
     host: 192.168.0.104      # DHCP lease as of 2026-07-29
     port: 5555
-    nuc: nuc-dev
+    nuc: nuc-hyperion
     # Second Dolphin Stick (Droidlogic ohm, Android 11) — same silicon as
     # D-005-02408: mali0 debugfs uses the "mali0 total used_pages N" +
     # "kctx pid pages" layout rec.sh expects, and thermal_zone0/1 are
@@ -66,7 +69,7 @@ devices:
   DD-002-0939:
     host: 192.168.0.107      # DHCP lease as of 2026-07-29
     port: 5555
-    nuc: nuc-dev
+    nuc: nuc-hyperion
     # DIFFERENT PLATFORM from the D-005-* sticks: Google "DD-Stick"/ross,
     # Android 14 (vs Droidlogic ohm / Android 11). Same amlogic SoC family.
     # modules set from probe results — see TODO "DD-Stick (Android 14) support".
@@ -75,13 +78,16 @@ devices:
   4dd8d6299e8c123:
     host: 192.168.0.105
     port: 5555
-    nuc: nuc-dev
+    nuc: nuc-hyperion
     # gpu OFF: this is an rk3588 box, and its /sys/kernel/debug/mali0/gpu_memory
     # uses a 2-column layout ("mali0  23881" + "kctx-0x…  N") instead of the
     # Dolphin Stick's "mali0 total used_pages N" + "kctx pid pages" rows, so
     # rec.sh's parser yields empty totals and cannot attribute pages to a pid.
     # Logs/thermal/mem/cpu/net all work. Needs a rec.sh parser update (§1.3).
     modules: []
+    # Not a Dolphin device: no app log to tail. Without this it logs
+    # "app log tail ended (EOF) — reopening" every 5 s forever.
+    app_package: ""
     friendly_name: tv-box-rk3588
 
 retention:
