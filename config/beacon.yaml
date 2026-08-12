@@ -19,8 +19,30 @@ endpoints:
   # s3_bucket: beacon-telemetry-...   # unset = keep Parquet local (pre-deploy)
   # s3_region: us-east-1
 
-# App under observation
+# App under observation. Overridable per device below — set app_package: ""
+# on a device that has no Dolphin app, or its app-log tail logs
+# "ended (EOF) — reopening" every 5 s forever.
 app_package: com.dolphin_us.dolphinstore
+
+# LAN adoption of adb devices. OFF by default: plan.md §2.3 wants explicit
+# device->NUC assignment, because two NUCs collecting one stick doubles device
+# load and corrupts every cumulative counter (each keeps its own in-memory
+# total, both publish to the same series, and rate() reads the interleaving as
+# repeated counter resets).
+#
+# Turn it on for a single-NUC test bench where every device on the wifi should
+# be collected without editing this file for each one. Adopted devices get the
+# full treatment — adb root, logd remediation, the detached recorder — which
+# MUTATES them, so only enable this on a LAN whose devices are yours.
+#
+# It also relocates a known serial that changed DHCP lease, which a static
+# host: cannot: a lease is not an identity.
+discovery:
+  enabled: false
+  subnet: 192.168.0.0/24
+  port: 5555
+  interval: 300           # seconds between sweeps
+  skip_serials: []        # devices on the LAN to leave alone
 
 # Explicit device -> NUC ownership. A device listed here is collected by THIS
 # NUC only if nuc matches nuc_id. Cloud alerts on duplicate ingestion later.

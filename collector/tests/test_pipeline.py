@@ -200,3 +200,79 @@ def test_logcat_since_is_quoted_for_the_device_shell():
 
     asyncio.run(drain(None))
     assert "-T" not in seen["cmd"]
+
+
+# ---- discovery (§2.3, relaxed for the test bench) ------------------------------
+
+def test_sweep_finds_only_listening_hosts():
+    import asyncio, socket
+    from beacon_collector import discovery
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    open_ = asyncio.run(discovery._port_open("127.0.0.1", port, 1.0))
+    shut = asyncio.run(discovery._port_open("127.0.0.1", port + 1, 0.3))
+    srv.close()
+    assert open_ == f"127.0.0.1:{port}"
+    assert shut is None
+
+
+def test_sweep_rejects_a_bad_subnet_instead_of_raising():
+    import asyncio
+    from beacon_collector import discovery
+    assert asyncio.run(discovery.sweep("not-a-subnet")) == []
+
+
+def test_discovery_config_requires_a_subnet_when_enabled(tmp_path):
+    import pytest, yaml
+    from beacon_collector.config import load_config
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    p = cfg_dir / "beacon.yaml"
+    base = {"nuc_id": "n", "devices": {},
+            "discovery": {"enabled": True}}          # subnet missing
+    p.write_text(yaml.safe_dump(base))
+    with pytest.raises(ValueError, match="discovery.subnet"):
+        load_config(p)
+
+    base["discovery"]["subnet"] = "192.168.0.0/24"
+    p.write_text(yaml.safe_dump(base))
+    assert load_config(p).discovery.subnet == "192.168.0.0/24"
+
+
+def test_discovery_is_off_unless_asked(tmp_path):
+    import yaml
+    from beacon_collector.config import load_config
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    p = cfg_dir / "beacon.yaml"
+    p.write_text(yaml.safe_dump({"nuc_id": "n", "devices": {}}))
+    assert load_config(p).discovery.enabled is False
+
+
+def test_relocating_a_device_changes_its_address_with_no_restart():
+    """DHCP moved the lease. address is a property over host, so mutating host
+    is enough — the supervisor's next reconnect cycle uses the new address and
+    keeps its cursors."""
+    from beacon_collector.config import DeviceConfig
+    d = DeviceConfig(serial="D-005-02408", host="192.168.0.100")
+    assert d.address == "192.168.0.100:5555"
+    d.host = "192.168.0.107"
+    assert d.address == "192.168.0.107:5555"
+
+
+def test_applog_pump_is_not_spawned_without_an_app_package():
+    """A pump that returns immediately would win asyncio.wait(FIRST_COMPLETED)
+    and tear down every other stream, spinning a reconnect loop that collects
+    nothing — the exact failure mode of the 2026-07-28 logcat bug. So the task
+    must not be created at all."""
+    import inspect
+    from beacon_collector import supervisor
+    src = inspect.getsource(supervisor.DeviceSupervisor._connect_cycle)
+    assert "if self.app_package:" in src
+    body = inspect.getsource(supervisor.DeviceSupervisor._pump_applog)
+    assert "return" not in body.split("async for")[0]

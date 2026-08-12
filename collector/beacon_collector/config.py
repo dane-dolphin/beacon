@@ -15,10 +15,31 @@ class DeviceConfig:
     nuc: str = ""
     modules: list[str] = field(default_factory=lambda: ["gpu"])
     friendly_name: str = ""
+    # Per-device override of Config.app_package. Without it every device tails
+    # the Dolphin app-log path, and a non-Dolphin device (the rk3588 TV box, or
+    # anything discovery adopts) logs "app log tail ended (EOF) — reopening"
+    # every 5 s, forever. Set to "" to disable the app-log tail for a device.
+    app_package: str | None = None
+    # True when discovery adopted this device rather than the YAML declaring
+    # it, so logs can say which. Not persisted.
+    discovered: bool = False
 
     @property
     def address(self) -> str:
+        """Recomputed from host each time — discovery mutates `host` in place
+        to relocate a device that moved DHCP lease, and the supervisor's next
+        reconnect cycle picks it up with no restart."""
         return f"{self.host}:{self.port}"
+
+
+@dataclass
+class DiscoveryConfig:
+    """LAN adoption of adb devices. OFF unless explicitly enabled (§2.3)."""
+    enabled: bool = False
+    subnet: str = ""
+    port: int = 5555
+    interval: int = 300
+    skip_serials: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -33,6 +54,7 @@ class Config:
     s3_region: str
     app_package: str
     devices: dict[str, DeviceConfig]
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     vsync_interval: int = 10
     dumpsys_interval: int = 45
     reconnect_backoff_max: int = 60
@@ -66,7 +88,19 @@ def load_config(path: str | os.PathLike) -> Config:
             nuc=d.get("nuc", ""),
             modules=list(d.get("modules", ["gpu"])),
             friendly_name=d.get("friendly_name", serial),
+            app_package=d.get("app_package"),
         )
+
+    disc_raw = raw.get("discovery") or {}
+    discovery = DiscoveryConfig(
+        enabled=bool(disc_raw.get("enabled", False)),
+        subnet=disc_raw.get("subnet", ""),
+        port=int(disc_raw.get("port", 5555)),
+        interval=int(disc_raw.get("interval", 300)),
+        skip_serials=list(disc_raw.get("skip_serials") or []),
+    )
+    if discovery.enabled and not discovery.subnet:
+        raise ValueError("discovery.enabled is true but discovery.subnet is unset")
 
     return Config(
         nuc_id=raw["nuc_id"],
@@ -79,6 +113,7 @@ def load_config(path: str | os.PathLike) -> Config:
         s3_region=endpoints.get("s3_region", "us-east-1"),
         app_package=raw.get("app_package", "com.dolphin_us.dolphinstore"),
         devices=devices,
+        discovery=discovery,
         vsync_interval=int(intervals.get("vsync", 10)),
         dumpsys_interval=int(intervals.get("dumpsys", 45)),
         reconnect_backoff_max=int(intervals.get("reconnect_backoff_max", 60)),

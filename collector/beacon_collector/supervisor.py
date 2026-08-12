@@ -45,6 +45,20 @@ class DeviceSupervisor:
         self.last_rn_receive = 0.0
         self.boot_epoch: float | None = None
         self._had_boot = False
+        # unreachable-device accounting (§TODO P1): without this a dead device
+        # is completely silent — D-005-02408 was gone 13 h on 2026-07-29 and
+        # beacon.log said nothing, because _connect_cycle returns False with no
+        # log line and Adb.connect logs its failure at DEBUG.
+        self._fail_count = 0
+        self._down_since: float | None = None
+
+    @property
+    def app_package(self) -> str:
+        """Per-device override, falling back to the global. A discovered or
+        non-Dolphin device set to "" tails no app log at all."""
+        if self.dev.app_package is None:
+            return self.cfg.app_package
+        return self.dev.app_package
 
     async def run(self):
         backoff = 2.0
@@ -56,8 +70,33 @@ class DeviceSupervisor:
             except Exception:
                 log.exception("%s: supervisor cycle error", self.dev.serial)
                 ok = False
+            self._note_outcome(ok)
             backoff = 2.0 if ok else min(backoff * 2, self.cfg.reconnect_backoff_max)
             await asyncio.sleep(backoff)
+
+    def _note_outcome(self, ok: bool):
+        """Make an unreachable device visible, in the log and as a series."""
+        now = time.monotonic()
+        if ok:
+            if self._down_since is not None:
+                log.info("%s: reachable again after %.0fs (%d failed attempts)",
+                         self.dev.serial, now - self._down_since, self._fail_count)
+            self._fail_count = 0
+            self._down_since = None
+        else:
+            if self._down_since is None:
+                self._down_since = now
+            self._fail_count += 1
+            down = now - self._down_since
+            # every attempt while young, then throttle: a device down for hours
+            # should not write a line every 60 s
+            if self._fail_count <= 3 or self._fail_count % 10 == 0:
+                log.warning("%s: unreachable at %s (%d consecutive failures, "
+                            "down %.0fs)", self.dev.serial, self.dev.address,
+                            self._fail_count, down)
+        self.vm.enqueue([line("stick_device_down_seconds", {"serial": self.dev.serial},
+                              0.0 if ok else now - (self._down_since or now),
+                              time.time())])
 
     async def _connect_cycle(self) -> bool:
         """One connected session. Returns True if we got as far as streaming
@@ -87,17 +126,22 @@ class DeviceSupervisor:
             report = await onboarding.onboard(self.adb, d.address, d.serial, self.registry)
             log.info("%s: onboarding report: %s", d.serial, report)
 
-        await recorder.ensure_running(self.adb, d.address, self.cfg.app_package)
+        await recorder.ensure_running(self.adb, d.address, self.app_package)
 
         log.info("%s: streaming (boot_epoch=%.0f)", d.serial, self.boot_epoch or 0)
         tasks = [
             asyncio.create_task(self._pump_recorder(), name=f"{d.serial}-rec"),
             asyncio.create_task(self._pump_logcat(), name=f"{d.serial}-logcat"),
             asyncio.create_task(self._pump_dmesg(), name=f"{d.serial}-dmesg"),
-            asyncio.create_task(self._pump_applog(), name=f"{d.serial}-applog"),
             asyncio.create_task(self._poll_vsync(), name=f"{d.serial}-vsync"),
             asyncio.create_task(self._heartbeat(), name=f"{d.serial}-hb"),
         ]
+        # Gate at creation, NOT with an early return inside the pump: every
+        # task here is watched with FIRST_COMPLETED, so a pump that returns
+        # immediately tears down the whole session and spins a reconnect loop.
+        if self.app_package:
+            tasks.append(asyncio.create_task(self._pump_applog(),
+                                             name=f"{d.serial}-applog"))
         # first stream to die means the adb session is gone: tear down all
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
@@ -200,7 +244,7 @@ class DeviceSupervisor:
 
     async def _pump_applog(self):
         d = self.dev
-        async for raw in streams.app_log_lines(self.adb, d.address, self.cfg.app_package):
+        async for raw in streams.app_log_lines(self.adb, d.address, self.app_package):
             now = time.time()
             self.spool.append(d.serial, "applog", raw, ts=now)
             if self.processor:

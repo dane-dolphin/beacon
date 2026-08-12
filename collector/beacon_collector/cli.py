@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .adb import Adb
-from .config import load_config
+from .config import DeviceConfig, load_config
 from .registry import Registry
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "beacon.yaml"
@@ -106,6 +106,78 @@ async def _onboard(cfg, serial) -> int:
     return 0 if report["all_buffers_4mib"] else 1
 
 
+def _log_task_death(task: asyncio.Task):
+    """Supervisors spawned after startup are not in the original gather(), so
+    an exception in one would otherwise be swallowed until interpreter exit."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        log.error("task %s died: %r", task.get_name(), exc)
+
+
+async def _discovery_loop(cfg, adb, owned, spawned, registry, spool, vm,
+                          counters, processor):
+    """Periodically sweep the LAN, adopt new serials, relocate moved ones.
+
+    Relocation matters as much as adoption: a configured `host:` is a DHCP
+    lease, not an identity. D-005-02408's lease moved across three addresses in
+    three days, and when it moved the collector retried the dead IP forever.
+    Mutating `dev.host` is enough to fix it — DeviceConfig.address is a
+    property, so the supervisor's next reconnect cycle uses the new address
+    with no restart and no lost cursors.
+    """
+    from .discovery import scan
+    from .supervisor import DeviceSupervisor
+
+    d = cfg.discovery
+    skip = set(d.skip_serials)
+    log.info("discovery enabled: %s every %ds (skip: %s)",
+             d.subnet, d.interval, sorted(skip) or "none")
+
+    while True:
+        try:
+            found = await scan(adb, d.subnet, d.port)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("discovery: sweep failed")
+            found = {}
+
+        for serial, address in found.items():
+            if serial in skip:
+                continue
+            # §2.3 still holds for EXPLICIT assignments: if the YAML gives this
+            # serial to another NUC, that NUC owns it. Adopting it here is
+            # exactly the duplicate ingestion the ownership rule exists to stop.
+            declared = cfg.devices.get(serial)
+            if declared is not None and declared.nuc and declared.nuc != cfg.nuc_id:
+                log.debug("discovery: %s is assigned to NUC %s — not adopting",
+                          serial, declared.nuc)
+                continue
+
+            host = address.rsplit(":", 1)[0]
+            dev = owned.get(serial)
+            if dev is None:
+                dev = DeviceConfig(serial=serial, host=host, port=d.port,
+                                   nuc=cfg.nuc_id, friendly_name=serial,
+                                   discovered=True)
+                owned[serial] = dev
+                sup = DeviceSupervisor(adb, dev, cfg, registry, spool, vm,
+                                       counters, processor)
+                task = asyncio.create_task(sup.run(), name=f"sup-{serial}")
+                task.add_done_callback(_log_task_death)
+                spawned.append(task)          # strong ref: tasks are weakly held
+                log.info("discovery: adopted %s at %s", serial, address)
+                counters.inc("stick_devices_discovered_total", {"nuc": cfg.nuc_id})
+            elif dev.host != host:
+                log.warning("discovery: %s moved %s -> %s; relocating",
+                            serial, dev.host, host)
+                dev.host = host
+
+        await asyncio.sleep(d.interval)
+
+
 async def _run(cfg) -> int:
     from . import selfmon
     from .pipeline.metrics import EventCounters, VMWriter
@@ -113,7 +185,7 @@ async def _run(cfg) -> int:
     from .supervisor import DeviceSupervisor
 
     devices = cfg.my_devices()
-    if not devices:
+    if not devices and not cfg.discovery.enabled:
         print(f"no devices assigned to NUC {cfg.nuc_id!r} in config", file=sys.stderr)
         return 2
 
@@ -130,6 +202,7 @@ async def _run(cfg) -> int:
     log.info("collector %s starting: %d device(s): %s",
              cfg.nuc_id, len(devices), [d.serial for d in devices])
 
+    owned: dict[str, DeviceConfig] = {d.serial: d for d in devices}
     sups = [DeviceSupervisor(adb, d, cfg, registry, spool, vm, counters, processor)
             for d in devices]
     tasks = [asyncio.create_task(s.run(), name=f"sup-{s.dev.serial}") for s in sups]
@@ -138,6 +211,11 @@ async def _run(cfg) -> int:
     tasks.append(asyncio.create_task(selfmon.heartbeat(vm, cfg.nuc_id), name="selfmon"))
     if processor:
         tasks.append(asyncio.create_task(processor.run(), name="processor"))
+    if cfg.discovery.enabled:
+        tasks.append(asyncio.create_task(
+            _discovery_loop(cfg, adb, owned, tasks, registry, spool, vm,
+                            counters, processor),
+            name="discovery"))
 
     try:
         await asyncio.gather(*tasks)

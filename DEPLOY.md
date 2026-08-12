@@ -254,6 +254,44 @@ mkdir -p /opt/beacon/var        # systemd creates the log FILE, not its director
 
 `endpoints:` stay on `localhost` in Phase 1.
 
+**Discovery — adopt every adb device on the LAN.** Off by default. Turn it on
+for the office bench so a new device is collected without editing this file:
+
+```yaml
+discovery:
+  enabled: true
+  subnet: 192.168.0.0/24     # the PHYSICAL LAN, never a routed/tailnet range
+  port: 5555
+  interval: 300              # seconds between sweeps
+  skip_serials: []           # anything on the wifi to leave alone
+```
+
+Each sweep TCP-probes every address on the subnet (a /24 takes seconds, 64
+probes in flight), `adb connect`s whatever answers, and reads `ro.serialno`.
+A serial it has not seen is adopted and gets its own supervisor; a serial it
+knows at a **new address** is relocated in place — no restart, no lost stream
+cursors. That second half is the fix for a DHCP lease moving, which is what
+made `D-005-02408` retry a dead IP for 13 hours on 2026-07-29.
+
+Devices listed in `devices:` still work exactly as before. A device the YAML
+assigns to a *different* `nuc:` is never adopted — §2.3 ownership still holds
+where it was stated explicitly.
+
+Three things to be deliberate about:
+
+- Adopted devices get `adb root`, `logd --reinit` + `logcat -G`, and the
+  detached recorder. That **modifies the device**. Fine for a bench you own.
+- Keep `subnet:` on the physical LAN. Tailscale is installed on hyperion, and
+  pointing a sweep at a routed range is the one way "the other NUC is on a
+  different network" stops being true.
+- With discovery on, `enabled: false` matters on any *other* NUC that copies
+  this config, or both will adopt everything and double-ingest.
+
+An unreachable device is no longer silent. Each failed cycle counts, and the
+log carries the address, consecutive-failure count and elapsed downtime
+(throttled after the third), plus a `stick_device_down_seconds{serial}` series
+for the dashboard.
+
 ### 5. systemd unit
 
 **The unit is not in the repo.** It exists only as a *user* unit on the dev
@@ -390,6 +428,38 @@ depth, with `$serial` and a `$proc` multi-select.
 - Distinct process-name counts, per device and fleet-wide, as a cardinality
   watch
 
+### Reaching Grafana from another machine
+
+The compose file publishes `3000:3000`, which binds every interface — nothing
+to open, no firewall rule. Docker publishes ports through its own iptables
+chain, so ufw is usually not what is blocking if it fails.
+
+| from | URL |
+|---|---|
+| hyperion itself | <http://localhost:3000> |
+| another box on the same LAN | `http://<hyperion-lan-ip>:3000` |
+| anywhere, over Tailscale | `http://<hyperion-tailscale-ip>:3000` |
+
+```bash
+# on hyperion
+ip -4 addr show | grep inet          # LAN address
+tailscale ip -4                      # 100.x.y.z
+tailscale status                     # MagicDNS names, and who is online
+```
+
+**Use the raw `100.x` address, not the MagicDNS name.** hyperion's hostname is
+`pop-os`, which is the Pop!_OS default — if the dev laptop is on the same
+tailnet it is *also* `pop-os`, and Tailscale will have silently renamed one of
+them to `pop-os-1`. The IP is unambiguous.
+
+Log in as `admin` with the password from `deploy/.env` — or whatever you last
+set with `grafana cli admin reset-admin-password`, which wins over `.env` on an
+already-initialised Grafana.
+
+The same applies to the other two ports if you want them directly:
+VictoriaMetrics on `:8428`, Loki on `:3100`. Neither has authentication, which
+is fine over a tailnet and is exactly why `AllowedCidr` matters in Phase 2.
+
 ### Adding or editing a dashboard
 
 Drop a `.json` file into `deploy/grafana/dashboards/`. The provider polls every
@@ -430,6 +500,60 @@ There are two different endgames here and they differ by one file:
 
 Either way the dashboard JSON is untouched: panels reference datasources by
 `uid` (`beacon-vm`, `beacon-loki`), never by URL.
+
+---
+
+## Shipping a change to hyperion
+
+Develop on the dev machine, land it in git, pull on hyperion. What you re-run
+afterwards depends entirely on *what* changed — it is never "restart
+everything".
+
+```bash
+# dev machine
+.venv/bin/pytest -q                       # do not ship red
+git add -A && git commit -m "..." && git push
+
+# hyperion
+cd /opt/beacon && git pull
+```
+
+Note the two machines may authenticate to GitHub differently — hyperion's
+remote is HTTPS, the dev laptop's is SSH. If `git fetch` fails on one, check
+`git remote -v` before assuming the repo is broken.
+
+| what changed | what to re-run |
+|---|---|
+| `collector/**/*.py` | `sudo systemctl restart beacon-collector`. No reinstall — `pip install -e` imports from the source tree |
+| `config/beacon.yaml` | `sudo systemctl restart beacon-collector` |
+| `device/rec.sh` | **nothing.** The collector compares md5 on the next connect, kills the old recorder and relaunches — on *every* device, so expect a brief 1 Hz gap fleet-wide |
+| `deploy/grafana/dashboards/*.json` | **nothing.** Provisioner polls every 30 s |
+| `deploy/grafana/provisioning/*` | `docker compose … up -d` — datasources load at Grafana startup, not on a poll |
+| `deploy/docker-compose*.yml`, `deploy/loki/*.yaml`, `deploy/.env` | `docker compose … up -d`; only changed services are recreated |
+| `pyproject.toml` (new dependency) | `.venv/bin/pip install -e '.[dev]'`, then restart the collector |
+
+Where `docker compose …` means the full Phase 1 invocation:
+
+```bash
+cd /opt/beacon/deploy
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+Two things that are never needed on a code change: recreating the venv, and
+`docker compose down`. Bringing the stack down loses nothing by itself, but
+`down -v` deletes `vmdata`, `lokidata` and `grafanadata` — that is a real data
+loss once telemetry is flowing.
+
+After a collector restart, confirm it actually came back:
+
+```bash
+systemctl status beacon-collector --no-pager
+tail -n 40 /opt/beacon/var/beacon.log
+```
+
+Look for `streaming (boot_epoch=…)` per device. Repeating
+`streaming` / `ended cleanly (EOF)` / `will reconnect` every few seconds is the
+collect-nothing reconnect loop, not healthy operation.
 
 ---
 
