@@ -150,9 +150,28 @@ def _prune(cfg, args) -> int:
 
 
 async def _device(cfg, serial):
+    """Resolve a serial to a connectable device.
+
+    Falls back to the registry, because with discovery on, most devices are
+    never named in the YAML — and probe/onboard are exactly what you reach for
+    on a freshly adopted device whose platform is unknown.
+    """
     dev = cfg.devices.get(serial)
     if not dev:
-        print(f"unknown device {serial!r}; known: {sorted(cfg.devices)}", file=sys.stderr)
+        from .config import DeviceConfig
+        row = next((d for d in Registry(cfg.registry_db).list_devices()
+                    if d["serial"] == serial), None)
+        if row and row.get("address"):
+            host, _, port = row["address"].rpartition(":")
+            dev = DeviceConfig(serial=serial, host=host, port=int(port or 5555),
+                               nuc=cfg.nuc_id, friendly_name=row["friendly_name"],
+                               discovered=True)
+            print(f"{serial}: not in config; using discovered address "
+                  f"{dev.address}", file=sys.stderr)
+    if not dev:
+        known = sorted(set(cfg.devices) | {d["serial"] for d in
+                                           Registry(cfg.registry_db).list_devices()})
+        print(f"unknown device {serial!r}; known: {known}", file=sys.stderr)
         raise SystemExit(2)
     adb = Adb()
     if not await adb.connect(dev.address):

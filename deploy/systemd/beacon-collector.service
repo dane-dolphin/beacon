@@ -1,0 +1,27 @@
+# Beacon collector. Install with:
+#   sudo cp deploy/systemd/beacon-collector.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now beacon-collector
+#
+# A SYSTEM unit, not a user unit: it must run without anyone logged in, and
+# survive reboot with no `loginctl enable-linger`. Paths must be LITERAL —
+# systemd does not expand $HOME or ~ and fails with "not an absolute path".
+# Edit User= and the three paths if the checkout is not /opt/beacon.
+[Unit]
+Description=Beacon collector — streams Dolphin Sticks to VM/Loki/Parquet
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperion
+WorkingDirectory=/opt/beacon
+# adb is not on PATH; config paths are relative to WorkingDirectory
+Environment=BEACON_ADB=/opt/android/platform-tools/adb
+ExecStart=/opt/beacon/.venv/bin/beacon run
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/beacon/var/beacon.log
+StandardError=append:/opt/beacon/var/beacon.log
+
+[Install]
+WantedBy=multi-user.target

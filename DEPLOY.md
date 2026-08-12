@@ -294,35 +294,31 @@ for the dashboard.
 
 ### 5. systemd unit
 
-**The unit is not in the repo.** It exists only as a *user* unit on the dev
-laptop and has to be written for any new box. Write
-`/etc/systemd/system/beacon-collector.service`:
+The units live in the repo at `deploy/systemd/` — copy, do not retype:
 
-```ini
-[Unit]
-Description=Beacon collector — streams Dolphin Sticks to VM/Loki/Parquet
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=hyperion
-WorkingDirectory=/opt/beacon
-Environment=BEACON_ADB=/opt/android/platform-tools/adb
-ExecStart=/opt/beacon/.venv/bin/beacon run
-Restart=always
-RestartSec=10
-StandardOutput=append:/opt/beacon/var/beacon.log
-StandardError=append:/opt/beacon/var/beacon.log
-
-[Install]
-WantedBy=multi-user.target
+```bash
+mkdir -p /opt/beacon/var
+sudo cp /opt/beacon/deploy/systemd/beacon-collector.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now beacon-collector
+systemctl status beacon-collector --no-pager
 ```
 
-**Paths here must be literal.** systemd does not expand `$HOME` or `~` in
-`WorkingDirectory`, `ExecStart` or `StandardOutput` — a unit written with
-`$HOME` fails to start with a confusing "not an absolute path" error. Adjust
-`User=` and the three paths if your username is not `hyperion`.
+Do **not** open an editor mid-paste. `sudo nano /etc/systemd/...` inside a
+pasted block swallows the following lines as keystrokes, and you end up running
+`systemctl enable` against a unit file that was never written — which fails with
+"Unit file does not exist" and looks like a systemd problem. Either `cp` from
+the repo as above, or write it with `sudo tee <<'EOF'`.
+
+Edit `User=` and the three paths in the unit if the checkout is not
+`/opt/beacon` or your user is not `hyperion`. **Paths must be literal** —
+systemd expands neither `$HOME` nor `~`, and a unit written with them fails with
+a confusing "not an absolute path".
+
+This is a **system** unit, not a user unit: it runs with nobody logged in and
+survives reboot with no `loginctl enable-linger`. Closing your terminal does
+nothing to it. (The dev laptop runs a *user* unit, which is why that one needed
+lingering.)
 
 The collector never talks to Docker, so it needs no group membership and no
 socket access; `After=docker.service` is ordering only, so the stack is up
@@ -500,6 +496,70 @@ There are two different endgames here and they differ by one file:
 
 Either way the dashboard JSON is untouched: panels reference datasources by
 `uid` (`beacon-vm`, `beacon-loki`), never by URL.
+
+---
+
+## Device console
+
+Discovery adopts devices automatically, so `config/beacon.yaml` is no longer
+where a device's identity lives. Three per-device things a human still decides —
+name, app package, and whether to collect it at all — are stored in the registry
+and editable without touching YAML or restarting anything.
+
+```bash
+beacon devices                              # declared + seen + overridden
+beacon devices --json
+beacon devices --set DD-002-0657 --name office-stick-2
+beacon devices --set DTVB0010101 --app-package ""     # tail no app log
+beacon devices --set D-005-02408 --skip               # do not collect
+beacon devices --set D-005-02408 --no-skip            # collect again
+```
+
+Edits land in `device_overrides` and are re-read at the top of every supervisor
+cycle, so name/app-package/skip apply within ~60 s. Adoption decisions apply on
+the next discovery sweep.
+
+For a browser, install the optional console unit:
+
+```bash
+sudo cp /opt/beacon/deploy/systemd/beacon-console.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now beacon-console
+```
+
+Then `http://<host>:8088/` — a table of every device with editable name, app
+package and skip. It is a **separate process** from the collector on purpose:
+it shares only the SQLite registry, so it cannot wedge a stream or hold the
+event loop, and it can be restarted at will while collection continues.
+
+Two constraints worth knowing. It has **no authentication** — the unit binds
+`0.0.0.0`, which is fine on a lab LAN or tailnet and must never be
+port-forwarded; drop the flag to bind localhost and use an SSH tunnel instead.
+And it is deliberately **single-threaded**: sqlite3 connections are bound to
+the thread that opened them, so `ThreadingHTTPServer` throws `ProgrammingError`
+on the first write. If it ever needs concurrency, give each request its own
+`Registry` rather than reaching for the threading mixin.
+
+### If Loki starts rejecting pushes
+
+Symptom: `loki push failed: HTTP 500 … ResourceExhausted … larger than max`
+repeating every few seconds and never draining.
+
+Loki's distributor→ingester hop is gRPC with a 4 MiB default, and four devices
+produce ~5.6 MB per 3 s flush. The collector now splits payloads below that and
+re-splits anything oversized already in the spool, and both Loki configs raise
+the limit to 16 MiB with 32 MB/s ingestion. If you see it again:
+
+```bash
+docker logs beacon-loki --tail 80 | grep -iE "level=(warn|error)" | tail -20
+```
+
+**Loki reads its config only at startup**, and a bind-mounted config change does
+not alter the container spec — so `docker compose up -d` reports "Running" and
+changes nothing. Use `docker restart beacon-loki`.
+
+`entry too far behind` is different and expected: backfill older than Loki's
+ingestion window is dropped with a warning, because Parquet holds those lines
+unfiltered forever. Loki is the 30-day interactive tier, not the archive.
 
 ---
 

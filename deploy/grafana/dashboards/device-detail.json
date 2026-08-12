@@ -136,7 +136,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "GPU pages — app (raw 1 Hz + rolling max envelope)",
-      "description": "The ENVELOPE is the leak signal (plan.md §1.4). The raw series is a ±15% sawtooth from the WebView ping-pong; never judge a trend from it over minutes.",
+      "description": "The ENVELOPE is the leak signal (plan.md §1.4). The raw series is a ±15% sawtooth from the WebView ping-pong; never judge a trend from it over minutes. The app-scoped series exists only when the configured app_package is running AND its pid appears in mali debugfs; on a device not running the Dolphin app only the total shows.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -213,6 +213,11 @@
           "refId": "B",
           "expr": "max_over_time(stick_gpu_pages{serial=\"$serial\",proc=\"dplayer\"}[30m])",
           "legendFormat": "rolling max 30m"
+        },
+        {
+          "refId": "C",
+          "expr": "stick_gpu_pages_total{serial=\"$serial\"}",
+          "legendFormat": "GPU total (all processes)"
         }
       ]
     },
@@ -933,7 +938,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(stick_errors_total{serial=\"$serial\"}[24h]))",
+          "expr": "(sum(increase(stick_errors_total{serial=\"$serial\"}[24h]))) or vector(0)",
           "instant": true
         }
       ]
@@ -996,7 +1001,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(stick_unparsed_lines_total{serial=\"$serial\"}[24h]))",
+          "expr": "(sum(increase(stick_unparsed_lines_total{serial=\"$serial\"}[24h]))) or vector(0)",
           "instant": true
         }
       ]

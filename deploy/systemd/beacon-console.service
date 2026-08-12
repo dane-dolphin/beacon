@@ -1,0 +1,23 @@
+# Beacon device console (web UI + JSON API). Optional — the collector does not
+# need it. Install with:
+#   sudo cp deploy/systemd/beacon-console.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now beacon-console
+#
+# --host 0.0.0.0 has NO AUTHENTICATION. It is acceptable on a lab LAN or over a
+# tailnet; never port-forward it. Drop the flag to bind 127.0.0.1 only and
+# reach it through an SSH tunnel instead.
+[Unit]
+Description=Beacon device console (web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperion
+WorkingDirectory=/opt/beacon
+ExecStart=/opt/beacon/.venv/bin/beacon serve --host 0.0.0.0 --port 8088
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -24,6 +24,7 @@ sticks (adb TCP :5555) ──> NUC collector (this repo, Python)
 | `collector/` | Python package `beacon_collector` (NUC side) |
 | `device/rec.sh` | on-device 1 Hz recorder, survives adb disconnects (§1.12) |
 | `deploy/` | docker compose: VictoriaMetrics + Loki + Grafana + provisioning |
+| `deploy/systemd/` | collector + console units — copy, do not retype |
 | `infra/` | AWS SAM template (EC2 + S3 + IAM), `sam validate --lint` clean |
 | `config/beacon.yaml` | per-NUC config: endpoints, device→NUC ownership |
 | `scripts/` | fixture capture, e2e check, parquet compaction, deploy bundle |

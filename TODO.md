@@ -74,6 +74,40 @@ diagnosed entirely from data already on disk, and it was not memory-related
 (zero `OUT_OF_MEMORY`/alloc-failure lines; `MemAvailable` flat at ~2.29 GB
 through the freeze). Adding app-side logging would not have caught it.
 
+## Added 2026-08-11 — first real deployment (hyperion)
+
+- [x] **Open LAN discovery — LANDED.** `discovery.enabled` sweeps the subnet for
+      :5555, adb-connects, reads `ro.serialno`, adopts unknown serials and
+      relocates known ones that changed DHCP lease. Off by default; a serial the
+      YAML assigns to another NUC is not adopted (§2.3 still holds where stated).
+- [x] **An unreachable device logs NOTHING — FIXED.** Consecutive-failure count
+      and elapsed downtime at WARNING (throttled after 3), plus
+      `stick_device_down_seconds{serial}`.
+- [x] **Per-device `app_package` — LANDED.** `""` disables the app-log tail; the
+      missing-file retry now backs off 5 s -> 300 s instead of logging every 5 s
+      forever on every adopted non-Dolphin device.
+- [x] **Device console — LANDED.** `beacon devices` and `beacon serve`, with
+      name/app_package/skip overrides in a new `device_overrides` table, re-read
+      each supervisor cycle so edits need no restart.
+- [x] **Loki poison batch — FIXED.** `batch_max` was set in `__init__` and never
+      used, so `flush()` built one unbounded payload; 4 devices produced 5.6 MB
+      against Loki's 4 MiB gRPC limit, and the failed batch requeued at the same
+      size forever. Payloads now split below the limit, oversized spooled
+      payloads are re-split on drain, and both Loki configs raise the gRPC and
+      ingestion limits. Non-2xx failures now log status + body — previously only
+      400 was handled and everything else failed silently.
+
+- [ ] **P1 — `rec.sh` v2 has never run on hardware.** Verify on a real device:
+      `getconf CLK_TCK` and `PAGESIZE` exist under toybox, `smaps_rollup` is
+      readable as root on Android 11 AND 14, and the `#top` line does not
+      perturb the 1 Hz cadence. Symptom of failure: the per-process RAM/CPU
+      panels stay empty while every other panel has data.
+- [ ] **P2 — the office bench is four UNKNOWN devices** (`DTVB0010101`,
+      `DD-002-0657`, `DD-002-01656`, `DOLPHI02-1065`), none of them the D-005-*
+      sticks the config was written for. Platform facts (Android version, mali
+      layout, thermal zones) are unverified for all four — `beacon probe` each
+      before trusting their GPU or thermal series.
+
 ## Added 2026-07-30 — remove unwanted logs (§3.4 denylist)
 
 **~80% of logcat is removable noise on every stick.** Measured 2026-07-30 over a
