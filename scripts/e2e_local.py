@@ -22,8 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "collector"))
 
 from beacon_collector.config import load_config  # noqa: E402
-from beacon_collector.parsers.recorder_line import parse_recorder_line  # noqa: E402
-from beacon_collector.pipeline.metrics import EventCounters, VMWriter, sample_to_lines  # noqa: E402
+from beacon_collector.parsers.recorder_line import (parse_recorder_line,  # noqa: E402
+                                                    parse_top_line)
+from beacon_collector.pipeline.metrics import (EventCounters, VMWriter,  # noqa: E402
+                                               sample_to_lines, top_to_lines)
 from beacon_collector.pipeline.processor import Processor  # noqa: E402
 
 FIX = ROOT / "collector" / "tests" / "fixtures"
@@ -44,6 +46,9 @@ async def main() -> int:
     boot_epoch = now - samples[-1].uptime - 1  # place samples just before "now"
     for s in samples:
         vm.enqueue(sample_to_lines(SERIAL, s, boot_epoch))
+    # rec.sh v2 #top tier: per-process RAM/CPU on the same spine
+    for t in (t for t in map(parse_top_line, rec_lines) if t):
+        vm.enqueue(top_to_lines(SERIAL, t, boot_epoch))
     await vm.flush()
 
     # --- logcat fixtures -> processor -> Loki --------------------------------
@@ -78,6 +83,8 @@ async def main() -> int:
         (f'stick_mem_available_bytes{{serial="{SERIAL}"}}', "MemAvailable"),
         (f'stick_log_lines_total{{serial="{SERIAL}",level="E"}}', "E-line counter"),
         (f'last_over_time(stick_hdmi_connected{{serial="{SERIAL}"}}[6h])', "HDMI status (derived)"),
+        (f'sum(stick_proc_pss_bytes{{serial="{SERIAL}"}})', "top-N PSS (stacked total)"),
+        (f'count(stick_proc_cpu_seconds_total{{serial="{SERIAL}",mode="user"}})', "top-N processes seen"),
     ]:
         res = vm_query(q)
         status = "OK " if res else "FAIL"

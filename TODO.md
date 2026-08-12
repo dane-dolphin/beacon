@@ -14,14 +14,22 @@ Storage %, per-app CPU/RAM, top-N process breakdown, net throughput, ping).
 jiffies in field 10), temps, net ↓/↑ (delta of the rx/tx counters), app
 running/stopped (presence of `app_pid`).
 
-- [ ] **P1 — `rec.sh` v2: per-app CPU + RAM.** Today `rec.sh` tracks exactly one
-      pid (the `PKG` argument) and only its *GPU pages* — there is no per-process
-      CPU or RSS anywhere. Add a block for a configured package list:
-      `apps:name,pid,rss_kb,utime,stime;...`
-      Sources: `/proc/<pid>/status` → `VmRSS`, `/proc/<pid>/stat` fields 14/15
-      (utime/stime). Measured on D-005-02408: the app is **703 MB / 143% CPU**
-      and its WebView renderer another **188 MB / 80%**, which is what the ~5.9
-      loadavg is made of — none of that is visible today.
+- [x] **P1 — per-process CPU + RAM — LANDED 2026-08-11 (not yet on hardware).**
+      Delivered as the `#top` line below rather than the proposed 1 Hz
+      `apps:` block, and by top-5 **discovery** rather than a configured
+      package list — a new APK under test appears on its own with no config
+      change. New series: `stick_proc_rss_bytes`, `stick_proc_pss_bytes`,
+      `stick_proc_cpu_seconds_total{mode}`, `stick_mem_total_bytes`, all
+      labelled `{serial, proc}`. Two stacked panels on Device Detail.
+      **CPU is emitted in seconds, not ticks**, so no query needs the device's
+      `CLK_TCK`; `rate()x100` is percent-of-one-core and reproduces the
+      measured 143% exactly (verified against a live VM).
+      **PSS, not RSS, is the honest total** — summing RSS double-counts the
+      zygote's shared pages. Both ship; PSS is absent (not 0) where
+      `smaps_rollup` cannot be read.
+      Still open: a **configured package list sampled at 1 Hz**, if per-second
+      resolution on a known app is ever wanted. Top-5 at ~33 s cannot see
+      short bursts. That needs per-device `app_package` first (below).
       Note `io.shoonya.shoonyadpc` (~178 MB) is the closest match to the
       dashboard's `BAGENT`; there is no process literally named `bagent`.
 
@@ -30,27 +38,36 @@ running/stopped (presence of `app_pid`).
       (`/mnt/installer/0/emulated/0/Android/obb`), so target the real
       filesystem, not whatever `/data` maps to.
 
-- [ ] **P1 — capture `MemTotal` once.** The dashboard shows RAM *used*, but
-      `rec.sh` records only `MemAvailable`. `MemTotal` is constant per device
-      (3840484 kB on D-005-*, 3767328 kB on DD-002-0939) — put it in the
-      `#beacon-rec` header rather than paying for it every second.
+- [x] **P1 — capture `MemTotal` once — LANDED 2026-08-11.** Read once at
+      `rec.sh` startup and carried on the `#top` line, **not** in the
+      `#beacon-rec` header as originally proposed: the header is written only
+      when the file is ABSENT (§7), so an in-place upgrade would never emit it
+      on any device that already has a `rec.log`. Ships as
+      `stick_mem_total_bytes`.
 
-- [ ] **P2 — top-N processes, on a SEPARATE low-frequency line.** Emit a
-      `#top` line every 15–30 s from `ps -A -o RSS,PCPU,NAME --sort=-RSS`.
-      Three constraints, all real:
-      1. Do **not** walk `/proc` at 1 Hz — too expensive on this SoC.
-      2. `rec.sh` is the process that **wedged during the 07-29 freeze** (it
-         blocked reading mali debugfs and died 0.9 s before the kernel's first
-         fault). Every syscall added to the 1 Hz loop is another place it can
-         block; keep the hot tier lean and put expensive work where a stall
-         cannot kill the cheap tier.
-      3. Cap N at ~5 and normalise process names — a per-process `proc` label
-         is the same cardinality trap already flagged for `sig` below.
+- [x] **P2 — top-N processes on a SEPARATE low-frequency line — LANDED
+      2026-08-11.** `#top|uptime|MemTotal_kB|clk_tck|name,pid,rss_kb,pss_kb,utime,stime;...`
+      every `TOPINT` samples (default 30, ~33 s at the real ~1.1 s cadence).
+      All three constraints honoured: the 1 Hz line is byte-identical to v1
+      and gained no syscalls; ranking is one builtin `read` of
+      `/proc/<pid>/statm` per pid with **no fork**, and only the surviving 5
+      pay for `cmdline`/`stat`/`smaps_rollup`; N is capped at 5 on the device
+      and `normalize_proc()` collapses `:sandboxed_processN` so renderers
+      cannot mint a series each.
+      Deliberately **not** `ps -A -o RSS,PCPU,NAME --sort=-RSS` as sketched:
+      that assumes toybox `-o`/`--sort` support this rig has never verified,
+      `NAME` is `comm` (truncated to 15 chars, so the package name is lost),
+      and `PCPU` is an average since process start, not a rate.
+      **Residual risk, accepted and commented in the script:** a process
+      wedged in D state can still block a `/proc` read here and stall the
+      recorder — shell has no read timeout. Bounded to once per ~33 s.
 
-- [ ] **P2 — parser + tests for rec.sh v2.** `parse_recorder_line` hard-requires
-      `len(parts) == 11` and returns `None` otherwise, so a v2 line is silently
-      dropped. Version the header, accept both, and add regression tests for
-      each — existing captures in `var/spool` must keep parsing.
+- [x] **P2 — parser + tests for rec.sh v2 — LANDED 2026-08-11.** No version
+      negotiation was needed in the end: the 11-field 1 Hz line **did not
+      change**, so `parse_recorder_line` is untouched and every existing
+      capture in `var/spool` parses exactly as before. The new data rides a
+      new line type handled by `parse_top_line`, which returns `None` for
+      anything else. Regression tests assert both directions.
 
 **Explicitly NOT worth adding:** more app/logcat logging. The 07-29 freeze was
 diagnosed entirely from data already on disk, and it was not memory-related

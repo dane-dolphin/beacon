@@ -135,8 +135,8 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "GPU pages \u2014 app (raw 1 Hz + rolling max envelope)",
-      "description": "The ENVELOPE is the leak signal (plan.md \u00a71.4). The raw series is a \u00b115% sawtooth from the WebView ping-pong; never judge a trend from it over minutes.",
+      "title": "GPU pages — app (raw 1 Hz + rolling max envelope)",
+      "description": "The ENVELOPE is the leak signal (plan.md §1.4). The raw series is a ±15% sawtooth from the WebView ping-pong; never judge a trend from it over minutes.",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -371,7 +371,7 @@
       "id": 4,
       "type": "timeseries",
       "title": "Heartbeat age (ReactNativeJS)",
-      "description": "Stall threshold 30 s (plan.md \u00a71.8): median gap 2 ms, max observed 3 s.",
+      "description": "Stall threshold 30 s (plan.md §1.8): median gap 2 ms, max observed 3 s.",
       "gridPos": {
         "x": 0,
         "y": 17,
@@ -569,7 +569,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Display liveness (vsync rate) & HDMI",
-      "description": "50 Hz panel advances ~22 vsync/s under normal playback (plan.md \u00a71.14). HDMI is the app's own ground truth (\u00a71.9).",
+      "description": "50 Hz panel advances ~22 vsync/s under normal playback (plan.md §1.14). HDMI is the app's own ground truth (§1.9).",
       "gridPos": {
         "x": 12,
         "y": 25,
@@ -650,12 +650,412 @@
       ]
     },
     {
-      "id": 8,
-      "type": "logs",
-      "title": "Logs \u2014 filter with Log source / Level / Text filter above",
+      "id": 9,
+      "type": "timeseries",
+      "title": "RAM by process — top 5 (PSS)",
+      "description": "PSS, not RSS: summing RSS double-counts the zygote's shared framework pages and overstates the total. A process whose smaps_rollup is unreadable reports no PSS and is absent here — check the RSS series if something you expect is missing. The top 5 are chosen on-device by rec.sh, so this is not a topk() over all processes and cannot flap. A series that stops (app swapped out) leaves a gap, not a drop to 0.",
       "gridPos": {
         "x": 0,
         "y": 33,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proc) (stick_proc_pss_bytes{serial=\"$serial\"})",
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "CPU by process — top 5 (% of one core)",
+      "description": "Percent of a SINGLE core, so a threaded process legitimately exceeds 100% — the app measured 143% on D-005-02408. Sampled every ~33 s, so short bursts are invisible by design; the 1 Hz per-core stick_cpu_jiffies_total series is where those show up.",
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proc) (rate(stick_proc_cpu_seconds_total{serial=\"$serial\"}[2m])) * 100",
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Error rate — E/F, including deduplicated",
+      "description": "Counts EVERY E/F event, including the ~97% suppressed before Loki — only 3 exemplars per signature ship as text, the rest ride this counter (§3.4 rule 4). So this is the honest error volume, and it is not reproducible by counting rows in Loki. It also outlives Loki's 30-day retention. GPU faults come from the dmesg stream, not logcat.",
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(stick_errors_total{serial=\"$serial\"}[5m])) * 60",
+          "legendFormat": "errors/min"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(stick_gpu_faults_total{serial=\"$serial\"}[5m])) * 60",
+          "legendFormat": "GPU faults/min (dmesg)"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Log lines by level",
+      "description": "Total logcat volume by level, lines/min. Measured shape on this fleet is ~92.8% level I and 90.6% tag ReactNativeJS, so I dwarfing everything else is normal, not a fault. Watch the ratio change after a build, not the absolute height.",
+      "gridPos": {
+        "x": 12,
+        "y": 42,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (level) (rate(stick_log_lines_total{serial=\"$serial\"}[5m])) * 60",
+          "legendFormat": "{{level}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(stick_unparsed_lines_total{serial=\"$serial\"}[5m]) * 60",
+          "legendFormat": "unparsed"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Errors, last 24 h",
+      "description": "Every E/F event in the last 24 h, deduplicated ones included. Measured baseline was ~7 MB/day of error text, of which one benign WebView sandbox signature ('failed to create Unix domain socket') was 31 occurrences in 61 s — a high number here is not automatically a problem, a CHANGE in it is.",
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5000
+              },
+              {
+                "color": "red",
+                "value": 50000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(stick_errors_total{serial=\"$serial\"}[24h]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Unparsed lines, last 24 h",
+      "description": "The format-change canary (§3.4 rule 2). Unparsed lines ALWAYS ship to Loki, so nothing is lost — but a rising rate means logcat is emitting a shape the parser does not know, usually after an app or OS update. A sustained non-zero climb here is the signal to go look at the raw lines, which are in the Logs panel under level=unparsed.",
+      "gridPos": {
+        "x": 8,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(stick_unparsed_lines_total{serial=\"$serial\"}[24h]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "Top error signatures in range",
+      "description": "Ranked by occurrences over the dashboard range. The label is a TRUNCATED SHA1 of the normalized message, not the message — digits and hex are collapsed first so 'expire 77 lines' and 'expire 81 lines' count as one signature. To find out what a hash means, open the Logs panel and read the E/F exemplars over the same window; the sig is not yet carried as a Loki label, so there is no direct link. This is the panel to check first after a build change: a signature going 30/min -> 3000/min is exactly what the dedup counter exists to make visible.",
+      "gridPos": {
+        "x": 16,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "topk(10, sum by (sig) (increase(stick_errors_total{serial=\"$serial\"}[$__range])))",
+          "legendFormat": "{{sig}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "Logs — filter with Log source / Level / Text filter above",
+      "gridPos": {
+        "x": 0,
+        "y": 57,
         "w": 24,
         "h": 11
       },

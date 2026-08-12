@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from .adb import Adb
+from .parsers.recorder_line import TOP_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -66,11 +67,21 @@ async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
     which ends this generator — the supervisor owns reconnect policy.
     """
     seen = last_uptime
+    # #top lines carry their own uptime and arrive ~30x less often, so they get
+    # their own cursor. Sharing `seen` with the 1 Hz lines would drop whichever
+    # kind lost the race at a given uptime.
+    seen_top = last_uptime
 
     while True:
         dump = await adb.shell(
             address, f"cat {REMOTE_LOG}.1 {REMOTE_LOG} 2>/dev/null", timeout=120.0)
         for line in _current_boot_lines(dump.splitlines()):
+            top_up = _top_uptime_of(line)
+            if top_up is not None:
+                if top_up > seen_top:
+                    seen_top = top_up
+                    yield line
+                continue
             up = _uptime_of(line)
             if up is not None and up > seen:
                 seen = up
@@ -80,6 +91,13 @@ async def backfill_and_follow(adb: Adb, address: str, last_uptime: float):
         prev_up = None
         async with adb.stream(address, "shell", "tail", "-f", "-n", "50", REMOTE_LOG) as s:
             async for line in s.lines(idle_timeout=90.0):
+                top_up = _top_uptime_of(line)
+                if top_up is not None:
+                    if top_up > seen_top:
+                        seen_top = top_up
+                        got_any = True
+                        yield line
+                    continue
                 up = _uptime_of(line)
                 if up is None:
                     continue
@@ -126,6 +144,23 @@ def _current_boot_lines(lines: list[str]) -> list[str]:
             start = i
         prev = up
     return lines[start:]
+
+
+def _top_uptime_of(line: str) -> float | None:
+    """Uptime of a rec.sh v2 `#top` line, or None if it is not one.
+
+    Kept separate from _uptime_of so boot-boundary detection stays driven by
+    the 1 Hz lines alone — _current_boot_lines is load-bearing and tested.
+    """
+    if not line.startswith(TOP_PREFIX):
+        return None
+    parts = line.split("|", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        return float(parts[1])
+    except ValueError:
+        return None
 
 
 def _uptime_of(line: str) -> float | None:

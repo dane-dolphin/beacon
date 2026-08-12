@@ -8,8 +8,9 @@ from . import onboarding, recorder, streams
 from .adb import Adb
 from .config import Config, DeviceConfig
 from .parsers import dmesg as dmesg_parser
-from .parsers.recorder_line import parse_recorder_line
-from .pipeline.metrics import EventCounters, VMWriter, line, sample_to_lines
+from .parsers.recorder_line import TOP_PREFIX, parse_recorder_line, parse_top_line
+from .pipeline.metrics import (EventCounters, VMWriter, line, sample_to_lines,
+                               top_to_lines)
 from .pipeline.spool import RawSpool
 from .registry import Registry
 
@@ -155,6 +156,15 @@ class DeviceSupervisor:
     async def _pump_recorder(self):
         d = self.dev
         async for raw in recorder.backfill_and_follow(self.adb, d.address, self.last_uptime):
+            if raw.startswith(TOP_PREFIX):
+                t = parse_top_line(raw)
+                if t is None:
+                    continue
+                # NOT a last_uptime cursor update: that cursor belongs to the
+                # 1 Hz tier, and moving it here would skip real samples.
+                self.spool.append(d.serial, "rec", raw, ts=t.wall_ts(self.boot_epoch))
+                self.vm.enqueue(top_to_lines(d.serial, t, self.boot_epoch))
+                continue
             s = parse_recorder_line(raw)
             if s is None:
                 continue

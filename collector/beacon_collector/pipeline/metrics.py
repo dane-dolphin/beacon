@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from ..parsers.recorder_line import RecorderSample
+from ..parsers.recorder_line import RecorderSample, TopSample
 from .spool import PendingQueue
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,51 @@ def sample_to_lines(serial: str, s: RecorderSample, boot_epoch: float,
     for iface, rx, tx in _named(s.net):
         L.append(line("stick_net_bytes_total", {"serial": serial, "iface": iface, "dir": "rx"}, rx, ts))
         L.append(line("stick_net_bytes_total", {"serial": serial, "iface": iface, "dir": "tx"}, tx, ts))
+    return L
+
+
+def top_to_lines(serial: str, t: TopSample, boot_epoch: float) -> list[str]:
+    """TopSample -> per-process series (§5).
+
+    CPU is emitted in SECONDS, not the raw ticks the kernel reports, so no
+    query ever has to know the device's CLK_TCK — `rate()` of this is cores,
+    x100 is percent-of-one-core, matching the 143% measured by hand on
+    D-005-02408. (The per-core `stick_cpu_jiffies_total` predates this and
+    still carries jiffies; it comes straight from /proc/stat.)
+    """
+    ts = t.wall_ts(boot_epoch)
+    L: list[str] = []
+    if t.mem_total_kb:
+        L.append(line("stick_mem_total_bytes", {"serial": serial},
+                      t.mem_total_kb * 1024, ts))
+
+    # Processes sharing a normalized name MUST be summed here, not emitted
+    # separately. normalize_proc() deliberately collapses :sandboxed_processN,
+    # so WebView's renderer pool arrives as several rows with one name — and
+    # identical labels at an identical timestamp are one series in VM, where
+    # last-write-wins would silently drop every renderer but the last. pid is
+    # not a label (it churns; §5.1), so summing is the only correct merge.
+    agg: dict[str, list[int | None]] = {}
+    for p in t.procs:
+        a = agg.setdefault(p.name, [0, 0, 0, 0])
+        a[0] += p.rss_kb
+        a[2] += p.utime_ticks
+        a[3] += p.stime_ticks
+        # PSS is all-or-nothing: a partial sum understates without saying so,
+        # and "absent" is the honest signal the panel already handles.
+        if p.pss_kb is None or a[1] is None:
+            a[1] = None
+        else:
+            a[1] += p.pss_kb
+
+    for name, (rss, pss, ut, st) in agg.items():
+        lbl = {"serial": serial, "proc": name}
+        L.append(line("stick_proc_rss_bytes", lbl, rss * 1024, ts))
+        if pss is not None:
+            L.append(line("stick_proc_pss_bytes", lbl, pss * 1024, ts))
+        for mode, ticks in (("user", ut), ("system", st)):
+            L.append(line("stick_proc_cpu_seconds_total", {**lbl, "mode": mode},
+                          ticks / t.clk_tck, ts))
     return L
 
 

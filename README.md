@@ -20,6 +20,7 @@ sticks (adb TCP :5555) ──> NUC collector (this repo, Python)
 | path | what |
 |---|---|
 | `plan.md` | the build brief — ground truth |
+| `DEPLOY.md` | deployment runbook: NUC all-in-one, then EC2 split |
 | `collector/` | Python package `beacon_collector` (NUC side) |
 | `device/rec.sh` | on-device 1 Hz recorder, survives adb disconnects (§1.12) |
 | `deploy/` | docker compose: VictoriaMetrics + Loki + Grafana + provisioning |
@@ -33,7 +34,8 @@ sticks (adb TCP :5555) ──> NUC collector (this repo, Python)
 # 1. observability stack
 cd deploy && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 
-# 2. python env
+# 2. python env  (Pop!_OS/Ubuntu: `sudo apt install -y python3-venv` first,
+#                 or the venv fails at ensurepip)
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 
 # 3. tests + offline end-to-end (replays measured fixtures through the stack)

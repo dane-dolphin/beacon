@@ -1,0 +1,505 @@
+{
+  "uid": "beacon-process-detail",
+  "title": "Process Resources",
+  "tags": [
+    "beacon"
+  ],
+  "schemaVersion": 39,
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "serial",
+        "label": "Device",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "beacon-vm"
+        },
+        "query": "label_values(stick_uptime_seconds, serial)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "proc",
+        "label": "Process",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "beacon-vm"
+        },
+        "query": "label_values(stick_proc_rss_bytes{serial=\"$serial\"}, proc)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "RAM by process (PSS, stacked)",
+      "description": "PSS, not RSS: summing RSS double-counts the zygote's shared framework pages, so a stacked RSS total overstates real usage. Processes sharing a normalized name (WebView's renderer pool) are summed in the collector. A process whose smaps_rollup is unreadable reports no PSS and is absent here — check the RSS panel if something is missing. Top 5 are chosen on-device by rec.sh, so this is not a topk() and cannot flap.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proc) (stick_proc_pss_bytes{serial=\"$serial\", proc=~\"$proc\"})",
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "CPU by process (% of one core, stacked)",
+      "description": "Percent of a SINGLE core, so a threaded process legitimately exceeds 100% — the app measured 143% on D-005-02408. Sampled every ~33 s, so short bursts are invisible by design; the 1 Hz per-core stick_cpu_jiffies_total series is where those show up. A merged renderer pool can dip when a renderer exits; rate() reads that as a counter reset and resumes, so brief undercounts are expected.",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proc) (rate(stick_proc_cpu_seconds_total{serial=\"$serial\", proc=~\"$proc\"}[2m])) * 100",
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Peak RAM over the selected range",
+      "description": "Instant query over the whole dashboard range, so it answers 'who was biggest this week' without topk() flapping — a range topk() is re-evaluated at every timestamp and makes series blink in and out. This is the panel to read when the app under test changed mid-range.",
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max_over_time(stick_proc_pss_bytes{serial=\"$serial\", proc=~\"$proc\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Peak CPU over the selected range",
+      "description": "Same instant-over-range treatment as the RAM panel. The inner rate() is subqueried across the range, so this is peak sustained CPU, not a single spike.",
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max_over_time(sum by (proc) (rate(stick_proc_cpu_seconds_total{serial=\"$serial\", proc=~\"$proc\"}[2m]))[$__range:]) * 100)",
+          "instant": true,
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "System memory vs. the top 5",
+      "description": "Context for the stacked panels: the top 5 never explain all of Used — the rest is the other ~200 processes plus kernel and page cache. A widening gap between Used and the top-5 sum means the growth is NOT in the processes being watched.",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 16,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "stick_mem_total_bytes{serial=\"$serial\"}",
+          "legendFormat": "MemTotal"
+        },
+        {
+          "refId": "B",
+          "expr": "stick_mem_total_bytes{serial=\"$serial\"} - stick_mem_available_bytes{serial=\"$serial\"}",
+          "legendFormat": "Used (MemTotal - MemAvailable)"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(stick_proc_pss_bytes{serial=\"$serial\", proc=~\"$proc\"})",
+          "legendFormat": "Sum of top 5 (PSS)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Distinct process names",
+      "description": "Cardinality watch. Every distinct name is a permanent series (x4 metrics) and dead series still cost index and query time. Top-5 caps how many appear per sample, NOT how many accumulate as top-5 membership churns. Scoped to the dashboard range, so it counts names ACCUMULATED over the window rather than whichever five are live this second — and it does not blank out when a device goes offline. Expect low tens; a few hundred means normalize_proc() is missing a variable suffix. This is the same trap that gave stick_errors_total{sig} 513 series in one hour.",
+      "gridPos": {
+        "x": 16,
+        "y": 18,
+        "w": 4,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(count by (proc) (last_over_time(stick_proc_rss_bytes{serial=\"$serial\"}[$__range])))",
+          "legendFormat": "this device"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Distinct names, fleet",
+      "description": "Fleet-wide distinct process names. Grows with device count only where devices run different software — the D-005 sticks should overlap almost completely.",
+      "gridPos": {
+        "x": 20,
+        "y": 18,
+        "w": 4,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 400
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(count by (proc) (last_over_time(stick_proc_rss_bytes[$__range])))",
+          "legendFormat": "all devices"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "RAM by process (RSS, stacked) — fallback view",
+      "description": "RSS is always present, so this shows processes the PSS panel omits (no readable smaps_rollup). The stacked total is NOT a truthful sum — shared pages are counted once per process. Use it to confirm a process exists and roughly how big it is, then read PSS for real numbers.",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "beacon-vm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 35,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proc) (stick_proc_rss_bytes{serial=\"$serial\", proc=~\"$proc\"})",
+          "legendFormat": "{{proc}}"
+        }
+      ]
+    }
+  ]
+}

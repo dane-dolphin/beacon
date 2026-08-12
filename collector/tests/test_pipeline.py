@@ -7,8 +7,8 @@ import pytest
 
 from beacon_collector.parsers.logcat import parse_logcat_line
 from beacon_collector.parsers.reassemble import Reassembler
-from beacon_collector.parsers.recorder_line import parse_recorder_line
-from beacon_collector.pipeline.metrics import line, sample_to_lines
+from beacon_collector.parsers.recorder_line import parse_recorder_line, parse_top_line
+from beacon_collector.pipeline.metrics import line, sample_to_lines, top_to_lines
 from beacon_collector.pipeline.spool import RawSpool
 from beacon_collector.pipeline.tiers import DENYLIST, TierFilter, signature
 
@@ -82,6 +82,66 @@ def test_sample_to_lines_schema():
     assert all(l.endswith(expect_ns) for l in lines)
     # §5.1: creative_id never appears as a label
     assert "creative" not in text
+
+
+def test_top_to_lines_schema():
+    raw = (FIX / "rec_sample.txt").read_text().splitlines()[-1]
+    t = parse_top_line(raw)
+    boot_epoch = 1_785_000_000.0
+    lines = top_to_lines("D-005-02408", t, boot_epoch)
+    text = "\n".join(lines)
+
+    assert "stick_mem_total_bytes,serial=D-005-02408 value=3932655616" in text
+    assert ("stick_proc_pss_bytes,proc=com.dolphin_us.dolphinstore,"
+            "serial=D-005-02408 value=719986688") in text
+    # CPU lands in SECONDS so no query needs to know the device's CLK_TCK:
+    # 58900 ticks / 100 = 589 s
+    assert ("stick_proc_cpu_seconds_total,mode=user,"
+            "proc=com.dolphin_us.dolphinstore,serial=D-005-02408 value=589.0") in text
+    # system_server had no smaps_rollup — no PSS series at all, rather than a 0
+    assert "proc=system_server" in text
+    assert "stick_proc_pss_bytes,proc=system_server" not in text
+    assert "stick_proc_rss_bytes,proc=system_server" in text
+
+    expect_ns = str(int((boot_epoch + t.uptime) * 1e9))
+    assert all(l.endswith(expect_ns) for l in lines)
+
+
+def test_renderer_pool_is_summed_not_collided():
+    """normalize_proc collapses :sandboxed_processN by design, so several rows
+    arrive under one name. Identical labels at one timestamp are ONE series in
+    VM — emitting them separately would last-write-wins away every renderer but
+    the last, silently understating the stacked total."""
+    t = parse_top_line("#top|10.0|100|100|"
+                       "com.foo,100,400000,390000,1000,100;"
+                       "com.foo:sandboxed_process0,101,100000,95000,500,50;"
+                       "com.foo:sandboxed_process1,102,120000,110000,600,60;")
+    lines = top_to_lines("S", t, 0.0)
+    pss = [l for l in lines if l.startswith("stick_proc_pss_bytes")]
+    assert len(pss) == 2                                   # not 3 — merged
+    renderer = next(l for l in pss if "sandboxed_processN" in l)
+    assert f"value={(95000 + 110000) * 1024}" in renderer   # summed, not 110000
+    cpu = next(l for l in lines
+               if "sandboxed_processN" in l and "mode=user" in l)
+    assert "value=11.0" in cpu                              # (500 + 600) / 100
+
+
+def test_partial_pss_in_a_merged_group_is_dropped_not_understated():
+    t = parse_top_line("#top|10.0|100|100|"
+                       "com.foo:sandboxed_process0,101,100000,95000,500,50;"
+                       "com.foo:sandboxed_process1,102,120000,0,600,60;")
+    text = "\n".join(top_to_lines("S", t, 0.0))
+    assert "stick_proc_pss_bytes" not in text               # would be a half-truth
+    assert f"stick_proc_rss_bytes,proc=com.foo:sandboxed_processN,serial=S " \
+           f"value={220000 * 1024}" in text
+
+
+def test_top_cpu_seconds_respects_device_clk_tck():
+    # a device reporting CLK_TCK=250 must not be read as if it were 100
+    t = parse_top_line("#top|10.0|100|250|app,1,1024,1024,500,250;")
+    text = "\n".join(top_to_lines("S", t, 0.0))
+    assert "mode=user,proc=app,serial=S value=2.0" in text
+    assert "mode=system,proc=app,serial=S value=1.0" in text
 
 
 def test_line_protocol_escaping():

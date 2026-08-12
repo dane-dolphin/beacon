@@ -5,7 +5,9 @@ from pathlib import Path
 from beacon_collector.parsers import dmesg
 from beacon_collector.parsers.logcat import attach_year, parse_logcat_line
 from beacon_collector.parsers.reassemble import Reassembler
-from beacon_collector.parsers.recorder_line import parse_recorder_line
+from beacon_collector.parsers.recorder_line import (normalize_proc,
+                                                    parse_recorder_line,
+                                                    parse_top_line)
 from beacon_collector.parsers import rn_fields
 from beacon_collector import recorder
 
@@ -34,6 +36,83 @@ def test_recorder_line_measured_sample():
 
     s2 = parse_recorder_line(lines[2])
     assert s2.net == [("wlan0", 9821000, 5035000)]  # v1 3-field chunk
+
+
+# ---- rec.sh v2 #top line (per-process CPU/RAM) --------------------------------
+
+def test_top_line_parses_all_processes():
+    lines = (FIX / "rec_sample.txt").read_text().splitlines()
+    t = parse_top_line(lines[-1])
+    assert t.uptime == 3211.05
+    assert t.mem_total_kb == 3840484
+    assert t.clk_tck == 100
+    assert len(t.procs) == 5
+
+    app = t.procs[0]
+    assert app.name == "com.dolphin_us.dolphinstore"
+    assert (app.pid, app.rss_kb, app.pss_kb) == (1689, 719872, 703112)
+    assert (app.utime_ticks, app.stime_ticks) == (58900, 14200)
+    # rec.sh writes pss=0 when smaps_rollup is unreadable; that is "unavailable",
+    # not "zero bytes", so it must not reach VM as a real measurement
+    assert t.procs[3].pss_kb is None
+    # a leading path is stripped on the device, and again here for safety
+    assert t.procs[4].name == "surfaceflinger"
+
+
+def test_top_line_renderer_digits_collapse_for_cardinality():
+    # §5.1: :sandboxed_processN must not mint a series per renderer
+    lines = (FIX / "rec_sample.txt").read_text().splitlines()
+    t = parse_top_line(lines[-1])
+    assert t.procs[1].name == "com.dolphin_us.dolphinstore:sandboxed_processN"
+
+    assert normalize_proc("com.foo:sandboxed_process12") == "com.foo:sandboxed_processN"
+    assert normalize_proc("com.foo:webview") == "com.foo:webview"
+    # digits that are NOT a renderer counter carry meaning and stay
+    assert normalize_proc("webview_zygote32") == "webview_zygote32"
+    assert normalize_proc("/system/bin/surfaceflinger") == "surfaceflinger"
+    # only an ABSOLUTE path is stripped: kernel threads are named kworker/0:1,
+    # and a blind split on "/" would label them "0:N" — the identity is lost.
+    # The remaining slash is rewritten by the charset rule, which is fine.
+    assert normalize_proc("kworker/0:1") == "kworker_0:N"
+    assert len(normalize_proc("x" * 200)) == 64
+
+
+def test_v1_parser_untouched_by_v2_lines():
+    """Existing captures in var/spool must keep parsing: the 1 Hz format did
+    not change, and a #top line is simply not a sample."""
+    lines = (FIX / "rec_sample.txt").read_text().splitlines()
+    assert parse_top_line(lines[1]) is None          # 1 Hz line is not a top line
+    assert parse_recorder_line(lines[-1]) is None    # top line is not a sample
+    assert parse_recorder_line(lines[1]).uptime == 3208.85
+
+
+def test_top_line_survives_a_malformed_process_chunk():
+    line = "#top|10.0|100|100|good,1,2,3,4,5;truncated,9,9;other,2,3,4,5,6;"
+    t = parse_top_line(line)
+    assert [p.name for p in t.procs] == ["good", "other"]
+
+
+def test_top_uptime_is_yielded_on_its_own_cursor():
+    # a #top line must survive the 1 Hz dedup, which keys on uptime
+    assert recorder._top_uptime_of("#top|123.4|1|100|a,1,2,3,4,5;") == 123.4
+    assert recorder._top_uptime_of("123.4|1|2|3|4|5|6|7|1 1 1|1,2,3;|a,1,2;") is None
+    assert recorder._uptime_of("#top|123.4|1|100|a,1,2,3,4,5;") is None
+
+
+def test_boot_boundary_ignores_top_lines_but_keeps_them():
+    """#top lines must not drive boot detection (their uptime is a coarse
+    subset), but they must survive inside the returned segment."""
+    dump = [
+        "#beacon-rec v2 pkg=x",
+        "9000.0|1|2|3|4|5|6|7|1 1 1|1,2,3;|a,1,2;",     # previous boot
+        "#top|9000.0|100|100|a,1,2,3,4,5;",             # previous boot
+        "10.0|1|2|3|4|5|6|7|1 1 1|1,2,3;|a,1,2;",       # <- reboot here
+        "#top|11.0|100|100|a,1,2,3,4,5;",
+        "12.0|1|2|3|4|5|6|7|1 1 1|1,2,3;|a,1,2;",
+    ]
+    seg = recorder._current_boot_lines(dump)
+    assert seg == dump[3:]
+    assert any(l.startswith("#top|") for l in seg)
 
 
 def test_recorder_wall_ts_uses_boot_epoch():
