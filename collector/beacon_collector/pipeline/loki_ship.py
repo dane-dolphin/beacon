@@ -80,7 +80,15 @@ class LokiShipper:
                 log.warning("loki rejected entries by timestamp (kept in Parquet): %s",
                             r.text[:200])
                 return True
-            return r.status_code in (200, 204)
+            if r.status_code not in (200, 204):
+                # Anything else used to fail silently, so a persistent 500 looked
+                # like nothing at all while the batch retried forever. The body
+                # is where the reason lives (out-of-order stream, too many
+                # streams, label problems) — surface it.
+                log.warning("loki push failed: HTTP %s %s",
+                            r.status_code, r.text[:200].replace("\n", " "))
+                return False
+            return True
         try:
             return await asyncio.to_thread(_send)
         except Exception as e:

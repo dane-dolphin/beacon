@@ -70,15 +70,32 @@ async def app_log_lines(adb: Adb, address: str, pkg: str, backlog_lines: int = 2
     """
     path = f"{APP_LOG_DIR.format(pkg=pkg)}/{APP_LOG_FILE}"
     n = str(backlog_lines)
+    # A device with no such file EOFs instantly, so a fixed retry logged a line
+    # every 5 s forever — per device. That is the normal case for anything
+    # discovery adopts that is not running the Dolphin app. Back off when the
+    # file is absent; snap back to 5 s as soon as it produces anything, since
+    # then the EOF is a real rotation and reattaching promptly matters.
+    backoff = 5.0
+    misses = 0
     while True:
         got_any = False
         async with adb.stream(address, "shell", "tail", "-f", "-n", n, path) as s:
             async for line in s.lines(idle_timeout=600.0):
                 got_any = True
                 yield line
-        log.info("%s: app log tail ended (%s) — reopening",
-                 address, "idle" if got_any else "EOF")
-        await asyncio.sleep(5.0)
+        if got_any:
+            backoff, misses = 5.0, 0
+            log.info("%s: app log tail ended (idle) — reopening", address)
+        else:
+            misses += 1
+            # first two at INFO so a genuinely missing log is visible once,
+            # then quiet: this is a steady state, not an incident
+            (log.info if misses <= 2 else log.debug)(
+                "%s: app log %s not readable (attempt %d) — retrying in %.0fs; "
+                "set app_package to \"\" for this device to stop tailing it",
+                address, path, misses, backoff)
+            backoff = min(backoff * 2, 300.0)
+        await asyncio.sleep(backoff)
         n = "0"  # after the first attach, don't re-emit backlog on reopen
 
 
