@@ -51,6 +51,7 @@ class DeviceSupervisor:
         # log line and Adb.connect logs its failure at DEBUG.
         self._fail_count = 0
         self._down_since: float | None = None
+        self._skipped = False
 
     @property
     def app_package(self) -> str:
@@ -60,9 +61,36 @@ class DeviceSupervisor:
             return self.cfg.app_package
         return self.dev.app_package
 
+    def _refresh_overrides(self) -> bool:
+        """Pull operator edits from the registry. Called at the top of every
+        cycle so a change in the console lands within one backoff (<=60 s)
+        rather than needing a collector restart. Returns True if this device
+        is currently skipped."""
+        try:
+            o = self.registry.overrides().get(self.dev.serial)
+        except Exception:
+            log.debug("%s: could not read overrides", self.dev.serial)
+            return False
+        if not o:
+            return False
+        if o["friendly_name"]:
+            self.dev.friendly_name = o["friendly_name"]
+        if o["app_package"] is not None:
+            self.dev.app_package = o["app_package"]
+        if o["skip"] != self._skipped:
+            log.info("%s: %s by operator override", self.dev.serial,
+                     "skipped" if o["skip"] else "un-skipped")
+            self._skipped = o["skip"]
+        return o["skip"]
+
     async def run(self):
         backoff = 2.0
         while True:
+            if self._refresh_overrides():
+                # skipped: hold without connecting, and re-check periodically so
+                # un-skipping also takes effect with no restart
+                await asyncio.sleep(30)
+                continue
             try:
                 ok = await self._connect_cycle()
             except asyncio.CancelledError:

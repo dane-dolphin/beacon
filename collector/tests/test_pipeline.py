@@ -276,3 +276,91 @@ def test_applog_pump_is_not_spawned_without_an_app_package():
     assert "if self.app_package:" in src
     body = inspect.getsource(supervisor.DeviceSupervisor._pump_applog)
     assert "return" not in body.split("async for")[0]
+
+
+# ---- device console (beacon devices / beacon serve) ----------------------------
+
+def _reg(tmp_path):
+    from beacon_collector.registry import Registry
+    return Registry(tmp_path / "r.db")
+
+
+def _cfg(tmp_path, devices=None, disc=None):
+    from beacon_collector.config import Config, DiscoveryConfig
+    return Config(nuc_id="nuc-a", registry_db=tmp_path, spool_dir=tmp_path,
+                  parquet_dir=tmp_path, victoriametrics="", loki="",
+                  s3_bucket=None, s3_region="us-east-1", app_package="com.dolphin",
+                  devices=devices or {}, discovery=disc or DiscoveryConfig())
+
+
+def test_override_roundtrip_and_partial_update(tmp_path):
+    r = _reg(tmp_path)
+    r.upsert_device("S1", "10.0.0.5:5555", "nuc-a", "from-config")
+    r.set_override("S1", friendly_name="bench-1")
+    r.set_override("S1", app_package="")        # must not clear the name set above
+    o = r.overrides()["S1"]
+    assert o["friendly_name"] == "bench-1" and o["app_package"] == "" and o["skip"] is False
+    assert r.list_devices()[0]["friendly_name"] == "bench-1"   # override wins
+
+
+def test_app_package_sentinel_clears_back_to_inherit(tmp_path):
+    r = _reg(tmp_path)
+    r.set_override("S1", app_package="com.foo")
+    assert r.overrides()["S1"]["app_package"] == "com.foo"
+    r.set_override("S1", app_package="-")       # "-" = inherit the global again
+    assert r.overrides()["S1"]["app_package"] is None
+    r.set_override("S1", app_package="")        # "" = tail no app log
+    assert r.overrides()["S1"]["app_package"] == ""
+
+
+def test_console_shows_declared_devices_that_never_connected(tmp_path):
+    """A stick configured but never arrived must still appear — that absence is
+    exactly what you open the console to notice."""
+    from beacon_collector.webui import _Handler
+    from beacon_collector.config import DeviceConfig, DiscoveryConfig
+
+    cfg = _cfg(tmp_path,
+               devices={"NEVER-SEEN": DeviceConfig(serial="NEVER-SEEN",
+                                                   host="10.0.0.9", nuc="nuc-a")},
+               disc=DiscoveryConfig(enabled=True, subnet="10.0.0.0/24"))
+    _Handler.registry, _Handler.cfg = _reg(tmp_path), cfg
+    row = next(d for d in _Handler._snapshot(_Handler)["devices"]
+               if d["serial"] == "NEVER-SEEN")
+    assert row["last_seen"] is None and row["declared"] is True
+
+    # a skipped serial in neither the config nor devices still surfaces
+    _Handler.registry.set_override("GHOST", skip=True)
+    assert any(d["serial"] == "GHOST" and d["skip"]
+               for d in _Handler._snapshot(_Handler)["devices"])
+
+
+def test_webui_writes_over_http(tmp_path):
+    import json as _json, threading, urllib.request
+    from http.server import HTTPServer
+    from beacon_collector.webui import _Handler
+
+    _Handler.registry, _Handler.cfg = _reg(tmp_path), _cfg(tmp_path)
+    srv = HTTPServer(("127.0.0.1", 0), _Handler)
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{srv.server_address[1]}/api/devices",
+        data=_json.dumps({"serial": "S9", "friendly_name": "x", "skip": True}).encode(),
+        headers={"content-type": "application/json"})
+
+    # The HANDLER must run in the thread that opened the registry — sqlite3
+    # connections are thread-bound, which is why serve() uses HTTPServer and
+    # not ThreadingHTTPServer. So drive the request from the background thread
+    # and keep handle_request here; inverting the two reproduces the
+    # ProgrammingError this arrangement exists to avoid.
+    got = {}
+
+    def client():
+        got["body"] = urllib.request.urlopen(req, timeout=5).read()
+
+    t = threading.Thread(target=client, daemon=True)
+    t.start()
+    srv.handle_request()
+    t.join(timeout=5)
+    srv.server_close()
+
+    assert _json.loads(got["body"])["ok"] is True
+    assert _Handler.registry.overrides()["S9"]["skip"] is True

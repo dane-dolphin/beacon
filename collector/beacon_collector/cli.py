@@ -30,6 +30,21 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("run", help="run the collector for all devices this NUC owns")
 
+    sd = sub.add_parser("devices", help="list every device: declared, seen, overridden")
+    sd.add_argument("--json", action="store_true", help="machine-readable output")
+    sd.add_argument("--set", metavar="SERIAL",
+                    help="edit one device instead of listing")
+    sd.add_argument("--name", help="friendly name (with --set; empty clears)")
+    sd.add_argument("--app-package",
+                    help="with --set: package to tail; '' = none, '-' = inherit global")
+    sd.add_argument("--skip", action="store_true", help="with --set: never collect")
+    sd.add_argument("--no-skip", action="store_true", help="with --set: collect again")
+
+    sv = sub.add_parser("serve", help="device console (read-mostly web UI)")
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="0.0.0.0 to reach it over the LAN/tailnet (no auth!)")
+    sv.add_argument("--port", type=int, default=8088)
+
     spr = sub.add_parser("prune", help="delete spool JSONL whose Parquet copy verifies (§P1)")
     spr.add_argument("--dry-run", action="store_true",
                      help="report what would be deleted, delete nothing")
@@ -51,7 +66,69 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run(cfg))
     if args.cmd == "prune":
         return _prune(cfg, args)
+    if args.cmd == "devices":
+        return _devices(cfg, args)
+    if args.cmd == "serve":
+        from .webui import serve
+        registry = Registry(cfg.registry_db)
+        serve(cfg, registry, args.host, args.port)
+        return 0
     return 2
+
+
+def _devices(cfg, args) -> int:
+    """List or edit devices. Reads the registry, so it works whether or not the
+    collector is running — and reflects discovery-adopted devices the YAML has
+    never heard of."""
+    from .webui import _Handler
+    registry = Registry(cfg.registry_db)
+
+    if args.set:
+        skip = True if args.skip else (False if args.no_skip else None)
+        registry.set_override(args.set, friendly_name=args.name,
+                              app_package=args.app_package, skip=skip)
+        print(f"override saved for {args.set}; applies on the next discovery sweep")
+        return 0
+
+    _Handler.registry, _Handler.cfg = registry, cfg
+    snap = _Handler._snapshot(_Handler)
+    if args.json:
+        print(json.dumps(snap, indent=2))
+        return 0
+
+    devs = snap["devices"]
+    print(f"{cfg.nuc_id}: {len(devs)} device(s); discovery "
+          + (f"{cfg.discovery.subnet} every {cfg.discovery.interval}s"
+             if cfg.discovery.enabled else "off"))
+    if not devs:
+        print("  (none yet — discovery adopts on its next sweep)")
+        return 0
+    print(f"  {'SERIAL':<22}{'NAME':<18}{'ADDRESS':<22}{'LAST SEEN':<12}FLAGS")
+    now = snap["now"]
+    for d in devs:
+        age = "never" if not d["last_seen"] else _age(now - d["last_seen"])
+        flags = []
+        if d["skip"]:
+            flags.append("SKIP")
+        if d.get("declared"):
+            flags.append("declared")
+        if d["app_package"] == "":
+            flags.append("no-applog")
+        elif d["app_package"]:
+            flags.append(d["app_package"])
+        print(f"  {d['serial']:<22}{d['friendly_name']:<18}"
+              f"{(d['address'] or '—'):<22}{age:<12}{' '.join(flags)}")
+    return 0
+
+
+def _age(s: float) -> str:
+    if s < 60:
+        return f"{s:.0f}s"
+    if s < 3600:
+        return f"{s/60:.0f}m"
+    if s < 86400:
+        return f"{s/3600:.1f}h"
+    return f"{s/86400:.1f}d"
 
 
 def _prune(cfg, args) -> int:
@@ -144,8 +221,16 @@ async def _discovery_loop(cfg, adb, owned, spawned, registry, spool, vm,
             log.exception("discovery: sweep failed")
             found = {}
 
+        # re-read each sweep: a skip set in the console must stop an adoption
+        # that would otherwise happen seconds later
+        try:
+            overrides = registry.overrides()
+        except Exception:
+            log.exception("discovery: could not read overrides")
+            overrides = {}
+
         for serial, address in found.items():
-            if serial in skip:
+            if serial in skip or overrides.get(serial, {}).get("skip"):
                 continue
             # §2.3 still holds for EXPLICIT assignments: if the YAML gives this
             # serial to another NUC, that NUC owns it. Adopting it here is
@@ -159,8 +244,11 @@ async def _discovery_loop(cfg, adb, owned, spawned, registry, spool, vm,
             host = address.rsplit(":", 1)[0]
             dev = owned.get(serial)
             if dev is None:
+                o = overrides.get(serial, {})
                 dev = DeviceConfig(serial=serial, host=host, port=d.port,
-                                   nuc=cfg.nuc_id, friendly_name=serial,
+                                   nuc=cfg.nuc_id,
+                                   friendly_name=o.get("friendly_name") or serial,
+                                   app_package=o.get("app_package"),
                                    discovered=True)
                 owned[serial] = dev
                 sup = DeviceSupervisor(adb, dev, cfg, registry, spool, vm,

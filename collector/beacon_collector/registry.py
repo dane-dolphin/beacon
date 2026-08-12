@@ -19,6 +19,21 @@ CREATE TABLE IF NOT EXISTS devices (
 
 -- One row per (device, boot). boot_epoch converts device-monotonic time
 -- (dmesg, /proc/uptime) to wall clock for that boot (§1.11).
+-- Operator overrides, editable from `beacon devices` / the web UI without
+-- touching config/beacon.yaml. Discovery adopts devices automatically, so the
+-- YAML is no longer where a device's identity lives — these three fields are
+-- the only per-device things a human still decides.
+--   friendly_name  dashboard label (falls back to the serial)
+--   app_package    NULL = inherit the global; '' = tail no app log at all
+--   skip           1 = never adopt or collect this serial
+CREATE TABLE IF NOT EXISTS device_overrides (
+    serial        TEXT PRIMARY KEY,
+    friendly_name TEXT,
+    app_package   TEXT,
+    skip          INTEGER NOT NULL DEFAULT 0,
+    updated       REAL
+);
+
 CREATE TABLE IF NOT EXISTS boots (
     serial      TEXT NOT NULL,
     boot_epoch  REAL NOT NULL,      -- host wall clock at device boot
@@ -79,6 +94,62 @@ class Registry:
                  friendly_name=excluded.friendly_name, last_seen=excluded.last_seen""",
             (serial, address, nuc, friendly_name, now, now),
         )
+        self.db.commit()
+
+    def list_devices(self) -> list[dict]:
+        """Every serial the registry has ever seen, newest contact first."""
+        cur = self.db.execute(
+            """SELECT d.serial, d.address, d.nuc, d.friendly_name, d.first_seen,
+                      d.last_seen, o.friendly_name, o.app_package, o.skip
+                 FROM devices d LEFT JOIN device_overrides o USING (serial)
+                ORDER BY d.last_seen DESC""")
+        out = []
+        for (serial, address, nuc, fname, first, last,
+             o_fname, o_pkg, o_skip) in cur.fetchall():
+            out.append({
+                "serial": serial, "address": address, "nuc": nuc,
+                "friendly_name": o_fname or fname or serial,
+                "app_package": o_pkg, "skip": bool(o_skip),
+                "first_seen": first, "last_seen": last,
+                "overridden": o_fname is not None or o_pkg is not None or bool(o_skip),
+            })
+        return out
+
+    # -- operator overrides ---------------------------------------------------
+
+    def set_override(self, serial: str, friendly_name: str | None = None,
+                     app_package: str | None = None, skip: bool | None = None):
+        """Upsert one override. None leaves a field unchanged; to clear
+        app_package back to "inherit the global", pass the sentinel "-"."""
+        cur = self.db.execute(
+            "SELECT friendly_name, app_package, skip FROM device_overrides WHERE serial=?",
+            (serial,))
+        row = cur.fetchone() or (None, None, 0)
+        fname = row[0] if friendly_name is None else (friendly_name or None)
+        pkg = row[1] if app_package is None else (None if app_package == "-" else app_package)
+        sk = row[2] if skip is None else int(bool(skip))
+        self.db.execute(
+            """INSERT INTO device_overrides (serial, friendly_name, app_package, skip, updated)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(serial) DO UPDATE SET
+                 friendly_name=excluded.friendly_name,
+                 app_package=excluded.app_package,
+                 skip=excluded.skip, updated=excluded.updated""",
+            (serial, fname, pkg, sk, time.time()))
+        self.db.commit()
+
+    def overrides(self) -> dict[str, dict]:
+        """serial -> {friendly_name, app_package, skip}. Read on every
+        discovery sweep, so an edit takes effect without a restart."""
+        cur = self.db.execute(
+            "SELECT serial, friendly_name, app_package, skip FROM device_overrides")
+        return {r[0]: {"friendly_name": r[1], "app_package": r[2], "skip": bool(r[3])}
+                for r in cur.fetchall()}
+
+    def forget_device(self, serial: str):
+        """Drop a serial from the registry. Discovery re-adopts it on the next
+        sweep unless it is also skipped — this clears history, not policy."""
+        self.db.execute("DELETE FROM devices WHERE serial=?", (serial,))
         self.db.commit()
 
     def touch_device(self, serial: str):
