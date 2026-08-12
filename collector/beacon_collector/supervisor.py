@@ -291,8 +291,21 @@ class DeviceSupervisor:
         """stick_heartbeat_age_seconds: age of the newest ReactNativeJS line
         (§1.8). 30 s stall threshold is safe — median gap 2 ms, max 3 s."""
         d = self.dev
+        ticks = 0
         while True:
             await asyncio.sleep(5)
+            # Keep last_seen fresh while streaming. upsert_device runs once per
+            # connect cycle, and a healthy session lasts hours — so without
+            # this the registry shows the CONNECT time and every console row
+            # reads "idle" for a device that is streaming perfectly. Every 30 s
+            # rather than every 5: it is a display freshness signal, not a
+            # heartbeat, and this is a synchronous SQLite write.
+            ticks += 1
+            if ticks % 6 == 0:
+                try:
+                    self.registry.touch_device(d.serial)
+                except Exception:
+                    log.debug("%s: touch_device failed", d.serial)
             if self.last_rn_receive:
                 age = time.time() - self.last_rn_receive
                 self.vm.enqueue([line("stick_heartbeat_age_seconds",

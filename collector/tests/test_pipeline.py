@@ -364,3 +364,21 @@ def test_webui_writes_over_http(tmp_path):
 
     assert _json.loads(got["body"])["ok"] is True
     assert _Handler.registry.overrides()["S9"]["skip"] is True
+
+
+def test_last_seen_is_refreshed_while_streaming(tmp_path):
+    """upsert_device runs once per connect cycle and a session lasts hours, so
+    without periodic touching every console row reads 'idle' for a device that
+    is streaming fine."""
+    import inspect
+    from beacon_collector import supervisor
+    src = inspect.getsource(supervisor.DeviceSupervisor._heartbeat)
+    assert "touch_device" in src, "heartbeat must refresh last_seen"
+
+    r = _reg(tmp_path)
+    r.upsert_device("S1", "10.0.0.5:5555", "nuc-a", "")
+    before = r.list_devices()[0]["last_seen"]
+    import time as _t
+    _t.sleep(0.01)
+    r.touch_device("S1")
+    assert r.list_devices()[0]["last_seen"] > before
