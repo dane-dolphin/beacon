@@ -15,12 +15,57 @@ log = logging.getLogger(__name__)
 # rules are the same as VM's (§5.1); everything else is line content.
 
 
+# Loki's distributor->ingester hop is gRPC, and its default
+# grpc_server_max_recv_msg_size is 4 MiB. A larger push is refused with
+# HTTP 500 "ResourceExhausted", the batch is requeued at the same size, and it
+# retries forever — a poison payload that never drains and blocks everything
+# behind it. Four devices produce ~5.6 MB per 3 s flush, so this is the normal
+# case, not an edge one. Split below the limit with room for JSON escaping.
+MAX_PAYLOAD_BYTES = 3_200_000
+_SIZE_ERRORS = (b"ResourceExhausted", b"larger than max", b"too large")
+
+
+def _payloads(streams: dict, max_bytes: int = MAX_PAYLOAD_BYTES) -> list[bytes]:
+    """Serialize accumulated streams into payloads each under max_bytes.
+
+    Splits between streams and, when one stream alone is too big, within its
+    values. Timestamps stay ascending per stream, which Loki requires, because
+    values are sorted before chunking and chunks preserve that order.
+    """
+    out: list[bytes] = []
+    cur: list[dict] = []
+    size = 2                                  # {"streams":[]}
+    for key, values in streams.items():
+        label = {"serial": key[0], "source": key[1], "level": key[2]}
+        overhead = len(json.dumps(label)) + 30
+        i, vals = 0, sorted(values, key=lambda x: x[0])
+        while i < len(vals):
+            bucket: list = []
+            bsize = overhead
+            while i < len(vals):
+                ts, line = vals[i]
+                vsize = len(ts) + len(line) + 10
+                if bucket and size + bsize + vsize > max_bytes:
+                    break
+                bucket.append(vals[i])
+                bsize += vsize
+                i += 1
+            cur.append({"stream": label, "values": bucket})
+            size += bsize
+            if i < len(vals) or size >= max_bytes:
+                out.append(json.dumps({"streams": cur}).encode())
+                cur, size = [], 2
+    if cur:
+        out.append(json.dumps({"streams": cur}).encode())
+    return out
+
+
 class LokiShipper:
     def __init__(self, base_url: str, spool_dir, flush_interval: float = 3.0,
-                 batch_max: int = 2000):
+                 max_payload_bytes: int = MAX_PAYLOAD_BYTES):
         self.url = base_url.rstrip("/") + "/loki/api/v1/push"
         self.flush_interval = flush_interval
-        self.batch_max = batch_max
+        self.max_payload_bytes = max_payload_bytes
         self.pending = PendingQueue(spool_dir, "loki")
         # {(serial, source, level): [[ts_ns, line], ...]}
         self._streams: dict[tuple, list] = {}
@@ -47,25 +92,42 @@ class LokiShipper:
         if not self._streams:
             return
         streams, self._streams, self._count = self._streams, {}, 0
-        payload = json.dumps({
-            "streams": [
-                {
-                    "stream": {"serial": k[0], "source": k[1], "level": k[2]},
-                    # Loki requires ascending timestamps per stream
-                    "values": sorted(v, key=lambda x: x[0]),
-                }
-                for k, v in streams.items()
-            ]
-        }).encode()
-        if not await self._post(payload):
-            self.pending.put(payload)
+        for payload in _payloads(streams, self.max_payload_bytes):
+            if not await self._post(payload):
+                self.pending.put(payload)
 
     async def _drain_pending(self, limit: int = 20):
         for p in self.pending.items()[:limit]:
-            if await self._post(p.read_bytes()):
+            data = p.read_bytes()
+            if await self._post(data):
                 p.unlink(missing_ok=True)
-            else:
-                return
+                continue
+            # An oversized payload spooled before the split existed can never
+            # succeed as-is, so retrying it forever starves everything behind
+            # it. Re-split it once and requeue the pieces.
+            if len(data) > self.max_payload_bytes and self._resplit(p, data):
+                continue
+            return
+
+    def _resplit(self, path, data: bytes) -> bool:
+        try:
+            doc = json.loads(data)
+            streams = {
+                (s["stream"]["serial"], s["stream"]["source"], s["stream"]["level"]):
+                    s["values"] for s in doc["streams"]
+            }
+        except Exception:
+            log.warning("dropping unparsable %d-byte pending loki payload "
+                        "(lines remain in Parquet)", len(data))
+            path.unlink(missing_ok=True)
+            return True
+        parts = _payloads(streams, self.max_payload_bytes)
+        log.info("re-split a %d-byte pending loki payload into %d",
+                 len(data), len(parts))
+        for part in parts:
+            self.pending.put(part)
+        path.unlink(missing_ok=True)
+        return True
 
     async def _post(self, payload: bytes) -> bool:
         def _send():
